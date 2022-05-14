@@ -5,9 +5,26 @@
 
 # Required packages
 library(xgboost); require(dplyr)
+library(readr)
+library(Matrix)
+
+source('./xG/xG_preparation.R')
 
 options(scipen = 999)
 set.seed(250)
+
+
+year = 2021
+season = '03'
+# tm = 'MTL'
+tm = 'NHL'
+sub_folder = 'base'
+yyyy_yyyy = paste( year, year+1, sep='-')
+data_folder = file.path( Sys.getenv(c('HOMEPATH')), 'Data/Src/Hockey/NHL', yyyy_yyyy, season)
+setwd( file.path( data_folder, sub_folder ) )
+
+fname_base = paste( tm, '_', sub_folder, '_', yyyy_yyyy, '_', season, '.csv.gz', sep='' )
+pbp_part <- read_csv( fname_base, col_types = cols(away_on_7 = "c", home_on_7 = "c") )
 
 
 ### Objects ###
@@ -221,7 +238,7 @@ xg_train_xgb <- xgb.train(data = full_xgb,
 
 
 # Save model
-#saveRDS(xg_train_xgb, "xG_model_XGB_7yr_EV_final_4.rds")
+saveRDS(xg_train_xgb, "xG_model_XGB_7yr_EV_final_4.rds")
 
 
 ##########################################################
