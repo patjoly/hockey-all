@@ -1,0 +1,38 @@
+Development Notes for my hockey-all repository
+
+	This is a repository I am modifying, mostly with the my-mods branch.
+
+
+xG_preparation.R
+	fun.pbp_expand()
+		coords_x, coords_y and event_zone
+			coords_x is the length of the ice, coords_y is the width. The middle of either is 0.
+
+			If we do 
+				table( pbp_part$coords_x, pbp_part$event_zone )
+			we see that -24 to 24 correspond to the Neu zone. And absolute values 25 to 99 correspond to the Def or Off zones.
+
+			Whether the event_zone is Off or Def depends on both the event_team and the period.
+
+			For instance, if we take 2021030111, the first event that is not in the neutral zone is shot attempt from Verhaeghe that goes wide. The event_team is FLA so the event_zone is offensive and the x coordinate is negative (-49).
+
+			So it would appear that in the first period, positive x coordinates denote the home team's defensive zone.
+
+			The next play is a hit from Fehervary (WAS), event_zone shows up as Def (makes sense) and the x coordinate is still negative (-91).
+
+			If we switch to the first event of the 2nd period that is not in the neutral zone, it is a face off won by FLA and the event_zone is Off, the x coordinate is now positive (69). So we see that the x coordinates alternate at each period.
+
+	event_description_exists = "event_description" %in% names(data)
+		I added this boolean to differentiation between old data and new data
+
+	various columns created
+		event_circle
+			not sure that this one is
+
+		event_zone
+			isn't it already defined? Add a break point there and inspect the data prior and after the mutate
+
+			also not sure why we are replacing it as
+				event_zone = ifelse(event_zone == "Def" & event_type == "BLOCK", "Off", event_zone), 
+
+
