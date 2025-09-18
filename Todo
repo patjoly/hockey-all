@@ -1,5 +1,18 @@
 To-do list for my hockey-all repository
 
 Next Steps:
+	xG_modelling.R:
+
+
+	xG_preparation.R:
+
+
+Pad -- just a temporary section -- don't commit this
+	Remember can use a mask, such as to use a subset of the data
+		mask <- pbp_part$event_zone == 'Neu'
+		df <- pbp_part[ mask, ]
+		table( df$coords_x, df$event_zone )
+
+		Just make sure the mask doesn't have NA values, must be fully TRUE/FALSE
 
 

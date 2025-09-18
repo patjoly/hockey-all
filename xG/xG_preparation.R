@@ -3,8 +3,10 @@
 #### --------------------------------------------------- ####
 
 
-# Required packages
-library(xgboost); library(dplyr)
+# Loading packages
+library(xgboost)
+library(dplyr)
+library(stringr)
 
 
 options(scipen = 999)
@@ -33,7 +35,7 @@ st.empty_net <- c("5vE", "Ev5", "4vE", "Ev4", "3vE", "Ev3") %>% as.factor()
 
 
 # Main preparation functions 
-fun.pbp_expand <- function(data) {
+fun.pbp_expand_Rscraped_data <- function(data) {
   
   # Prepares play by play data for the xG model. These variables are not xG specific and can be used for other tasks. 
   # Variables: event_circle, event_rinkside, event_zone, home_zone, pbp_distance, event_distance, event_angle, 
@@ -44,6 +46,21 @@ fun.pbp_expand <- function(data) {
   data$coords_y <- as.numeric(as.character(data$coords_y))
   
   print("expand", quote = F) 
+
+  # fixes for 20212022 season
+
+  # variables used by EH_scrape_functions.R for creating event_team
+  sc.main_events <- c( st.corsi_events, c("HIT", "GIVE", "TAKE", "FAC", "PENL") )
+  Team_ID_vec <- c(
+    "ANA", "ARI", "BOS", "BUF", "CAR", "CBJ", "CGY", "CHI", "COL", "DAL", "DET", "EDM", "FLA", "LAK", "MIN",
+    "MTL", "N.J", "NSH", "NYI", "NYR", "OTT", "PHI", "PIT", "S.J", "STL", "TBL", "TOR", "VAN", "WPG", "WSH",
+    "PHX", "ATL", "VGK", "L.V", "SEA"
+    )
+  data <- data %>% mutate(
+    event_team = ifelse( season== '20212022' & event_type %in% c(sc.main_events, "CHL", "DELPEN"),
+                         str_extract(event_description, "^[A-Z]\\.[A-Z]|^[A-Z]+"), event_team ),
+    event_team = ifelse( season== '20212022' & !event_team %in% Team_ID_vec, NA, event_team)  ## ensure event_team extacted is an actual team
+    )
   
   hold <- data %>% 
     # Manny's enhanced pbp functions (from the dryscrape functions)
@@ -141,7 +158,7 @@ fun.pbp_expand <- function(data) {
   
   # Add home_zonestart for corsi events
   face_index <- hold %>% 
-    filter(event_type %in% c(st.corsi_events, "FAC"),
+    dplyr::filter(event_type %in% c(st.corsi_events, "FAC"),
            game_period < 5
            ) %>%
     arrange(game_id, event_index) %>%
@@ -162,8 +179,86 @@ fun.pbp_expand <- function(data) {
   print("---", quote = F)
   
   hold <- left_join(hold, face_index, by = c("game_id", "event_index"))
-  }
-fun.pbp_index <- function(data) { 
+}
+
+fun.pbp_expand <- function(df) {
+  # re-define event vectors
+  st.fenwick_events <- c('shot-on-goal', 'goal', 'missed-shot')
+  st.corsi_events   <- c('shot-on-goal', 'goal', 'missed-shot', 'blocked-shot' )
+
+  # renaming a few cols so that I don't have to change cols names everywhere in this script or in xG_modelling.R
+  colnames(df)[colnames(df) == 'sit_strength']     <- 'game_strength_state'
+	colnames(df)[colnames(df) == 'details.xCoord']   <- 'coords_x'
+	colnames(df)[colnames(df) == 'details.yCoord']   <- 'coords_y'
+	colnames(df)[colnames(df) == 'details.zoneCode'] <- 'event_zone'
+  # ... zoneCode is provided by the json data (as O/D/N) -- only difference from R fetched/parsed data's event_zone is that it one letter instead of Off/Def/Neu
+
+  # Manny's enhanced pbp functions (from the dryscrape functions)
+  df$event_circle <-
+            1 * (df$coords_x <= -25 & df$coords_y > 0) +
+            2 * (df$coords_x <= -25 & df$coords_y < 0) +
+            3 * (df$coords_x < 0    & df$coords_x > 25 & df$coords_y > 0) +
+            4 * (df$coords_x < 0    & df$coords_x > 25 & df$coords_y < 0) +
+            5 * (abs(df$coords_x) < 5 & abs(df$coords_y) < 5) +
+            6 * (df$coords_x > 0   & df$coords_x < 25 & df$coords_y > 0) +
+            7 * (df$coords_x > 0   & df$coords_x < 25 & df$coords_y < 0) +
+            8 * (df$coords_x >= 25 & df$coords_y > 0) +
+            9 * (df$coords_x >= 25 & df$coords_y < 0)
+
+  df$event_rinkside  <-
+            ifelse( df$coords_x <= -25, 'L',
+                    ifelse( df$coords_x > -25 & df$coords_x < 25, 'N',
+                            ifelse( df$coords_x >= 25, 'R', NA )))
+  df$home_zone <-
+            ifelse( df$event_team == df$home_team,  df$event_zone,
+                    ifelse( df$event_zone == 'O', 'D',
+                            ifelse( df$event_zone == 'D', 'O', df$event_zone )) )
+
+  df$event_zone = ifelse( df$event_zone == 'D' & df$event_type == 'blocked-shot', 'O', df$event_zone )
+  # we may need to replace it as above though
+
+  # Expected x coord sign for Fenwick events:
+  df$fenwick_x_sign = ifelse( df$homeTeamDefendingSide == 'right', -1, 1 )
+  df$fenwick_x_sign = ifelse( df$event_team==df$home_team, df$fenwick_x_sign, - df$fenwick_x_sign)
+
+  df$is_long_shot   = ifelse( df$event_type %in% st.fenwick_events, df$coords_x * df$fenwick_x_sign < 0, FALSE )
+  # ... ie it's a long shot iff the signs of the x coord and the expected sign differ -- their product will be negative
+
+  df$coords_x_feet_from_gl = 89 - abs(df$coords_x)    # negative <=> shot from behind the goal line
+  df$coords_x_feet_from_gl = ifelse( df$is_long_shot, 89 * 2 - df$coords_x_feet_from_gl, df$coords_x_feet_from_gl )
+
+  df$event_distance = sqrt( df$coords_x_feet_from_gl^2 + df$coords_y^2 )
+  df$event_angle    =  abs( atan( df$coords_y / df$coords_x_feet_from_gl ) * 180 / pi )
+
+  # TODO: the R version of expand() above seemed to remove "Tip-In", "Wrap-around", "Deflected" from long shot distance and angle adjustment, look into why and it those need to be considered in the python data
+  # TODO: for penalty shots: need to ensure we have the correct home/away_skaters (1 and 0) and correct game_strength_state ('Ev1' or '1vE')
+
+  #
+  # Add home_zonestart for corsi events
+
+  df$event_index <- 1:nrow(df)
+
+  face_index <- df %>%
+    dplyr::filter(event_type %in% c(st.corsi_events, 'faceoff'),
+           period < 5
+           ) %>%
+    arrange(game_id, event_index) %>%
+    mutate(face_index = cumsum(event_type == 'faceoff')) %>%
+    group_by(game_id, face_index) %>%
+    arrange(event_index) %>%
+    mutate(test = first(home_zone),
+           home_zonestart = ifelse(first(home_zone) == 'D', 1,
+                                   ifelse(first(home_zone) == 'N', 2,
+                                          ifelse(first(home_zone) == 'O', 3, NA)))
+           ) %>%
+    ungroup() %>%
+    select(game_id, event_index, home_zonestart) %>%
+    data.frame()
+
+  df <- left_join(df, face_index, by = c('game_id', 'event_index'))
+}
+
+fun.pbp_index_Rscraped_data <- function(data) { 
   
   # Add shift/penlaty indexes, adjust the faceoff_index for xG training, & create unique shift IDs
   
@@ -179,7 +274,7 @@ fun.pbp_index <- function(data) {
   print("shift_ID", quote = F)
   
   hold <- pbp_hold %>% 
-    filter(event_type %in% c("FAC", "GOAL", "BLOCK", "SHOT", "MISS", "HIT", "TAKE", "GIVE"), 
+    dplyr::filter(event_type %in% c("FAC", "GOAL", "BLOCK", "SHOT", "MISS", "HIT", "TAKE", "GIVE"),
            game_period < 5
            ) %>% 
     group_by(game_id, game_period, season,
@@ -209,6 +304,47 @@ fun.pbp_index <- function(data) {
                                            "home_goalie", "away_goalie", 
                                            "face_index", "shift_index", "pen_index"))
 }
+
+fun.pbp_index <- function(data) { 
+  
+  # Add shift/penlaty indexes, adjust the faceoff_index for xG training, & create unique shift IDs
+  
+  pbp_hold <- data %>% 
+    arrange(game_id, event_index) %>% 
+    mutate(face_index =  cumsum(event_type == 'faceoff'), 
+           shift_index = cumsum(event_type == 'change-on'), 
+           pen_index =   cumsum(event_type == 'penalty'))
+  
+  hold <- pbp_hold %>% 
+    dplyr::filter(event_type %in% c('faceoff', 'goal', 'blocked-shot', 'shot', 'missed-shot', 'hit', 'takeaway', 'giveaway'),
+           period < 5
+           ) %>% 
+    group_by(game_id, period,
+             home_on_1, home_on_2, home_on_3, home_on_4, home_on_5, home_on_6, 
+             away_on_1, away_on_2, away_on_3, away_on_4, away_on_5, away_on_6, 
+             home_on_goalie, away_on_goalie, 
+             face_index, shift_index, pen_index
+             ) %>% 
+    # ... original function had season after game_id, period but each game_id is unique, so not sure what season would have accomplished there
+    mutate(shift_ID = round(first(event_index) * as.numeric(game_id))) %>% 
+    summarise(shift_ID = first(shift_ID), 
+              shift_length = last(game_seconds) - first(game_seconds)) %>% 
+    ungroup() %>% 
+    select(game_id, period, shift_ID, face_index, 
+           shift_index, pen_index, shift_length, home_on_1:away_on_goalie
+           ) %>% 
+    data.frame()
+  
+  join <- left_join(pbp_hold, hold, by = c('game_id',   'period',
+                                           'home_on_1', 'home_on_2', 'home_on_3', 
+                                           'home_on_4', 'home_on_5', 'home_on_6', 
+                                           'away_on_1', 'away_on_2', 'away_on_3', 
+                                           'away_on_4', 'away_on_5', 'away_on_6', 
+                                           'home_on_goalie', 'away_on_goalie', 
+                                           'face_index',  'shift_index', 'pen_index'))
+}
+
+
 fun.pbp_prep <- function(data, prep_type) {
   
   # Prepare pbp data for xG model training. 
@@ -218,7 +354,7 @@ fun.pbp_prep <- function(data, prep_type) {
     
     # Prep for EV xG model
     pbp_prep_EV <- data %>% 
-      filter(event_type %in% c("FAC", "GOAL", "BLOCK", "SHOT", "MISS", "HIT", "TAKE", "GIVE"), 
+      dplyr::filter(event_type %in% c("FAC", "GOAL", "BLOCK", "SHOT", "MISS", "HIT", "TAKE", "GIVE"),
              game_period < 5, 
              !(grepl("penalty shot", tolower(event_description))), 
              !is.na(coords_x),
@@ -237,7 +373,7 @@ fun.pbp_prep <- function(data, prep_type) {
              ) %>%
       ungroup() %>%
       arrange(season, game_id, event_index) %>% 
-      filter(event_type %in% st.fenwick_events, 
+      dplyr::filter(event_type %in% st.fenwick_events,
              game_strength_state %in% st.even_strength, 
              !is.na(coords_x_last), 
              !is.na(coords_y_last)
@@ -269,7 +405,7 @@ fun.pbp_prep <- function(data, prep_type) {
     
     # Prep for UE xG model
     pbp_prep_UE <- data %>% 
-      filter(event_type %in% c("FAC", "GOAL", "BLOCK", "SHOT", "MISS", "HIT", "TAKE", "GIVE"), 
+      dplyr::filter(event_type %in% c("FAC", "GOAL", "BLOCK", "SHOT", "MISS", "HIT", "TAKE", "GIVE"),
              game_period < 5, 
              !(grepl("penalty shot", tolower(event_description))), 
              !is.na(coords_x),
@@ -293,7 +429,7 @@ fun.pbp_prep <- function(data, prep_type) {
              ) %>% 
       ungroup() %>% 
       arrange(season, game_id, event_index) %>% 
-      filter(event_type %in% st.fenwick_events, 
+      dplyr::filter(event_type %in% st.fenwick_events,
              event_team == home_team & true_strength_state %in% c("6v5", "6v4", "5v4", "5v3", "4v3") | 
                event_team == away_team & true_strength_state %in% c("5v6", "4v6", "4v5", "3v5", "3v4"), 
              !is.na(coords_x_last), 
@@ -327,7 +463,7 @@ fun.pbp_prep <- function(data, prep_type) {
     
     # Prep for SH xG model
     pbp_prep_SH <- data %>% 
-      filter(event_type %in% c("FAC", "GOAL", "BLOCK", "SHOT", "MISS", "HIT", "TAKE", "GIVE"), 
+      dplyr::filter(event_type %in% c("FAC", "GOAL", "BLOCK", "SHOT", "MISS", "HIT", "TAKE", "GIVE"),
              game_period < 5, 
              !(grepl("penalty shot", tolower(event_description))), 
              !is.na(coords_x),
@@ -351,7 +487,7 @@ fun.pbp_prep <- function(data, prep_type) {
              ) %>% 
       ungroup() %>% 
       arrange(season, game_id, event_index) %>% 
-      filter(event_type %in% st.fenwick_events, 
+      dplyr::filter(event_type %in% st.fenwick_events,
              event_team == away_team & game_strength_state %in% c("5v4", "5v3", "4v3") | 
                event_team == home_team & game_strength_state %in% c("4v5", "3v5", "3v4"), 
              !is.na(coords_x_last), 
@@ -384,7 +520,7 @@ fun.pbp_prep <- function(data, prep_type) {
     
     # Prep for EN xG model
     pbp_prep_EN <- data %>% 
-      filter(event_type %in% c("FAC", "GOAL", "BLOCK", "SHOT", "MISS", "HIT", "TAKE", "GIVE"), 
+      dplyr::filter(event_type %in% c("FAC", "GOAL", "BLOCK", "SHOT", "MISS", "HIT", "TAKE", "GIVE"),
              game_period < 5, 
              !(grepl("penalty shot", tolower(event_description))), 
              !is.na(coords_x),
@@ -405,7 +541,7 @@ fun.pbp_prep <- function(data, prep_type) {
       group_by(season, game_id, pen_index) %>% 
       ungroup() %>% 
       arrange(season, game_id, event_index) %>% 
-      filter(event_type %in% st.fenwick_events, 
+      dplyr::filter(event_type %in% st.fenwick_events,
              event_team == away_team & game_strength_state %in% c("Ev5", "Ev4", "Ev3") | 
                event_team == home_team & game_strength_state %in% c("5vE", "4vE", "3vE"), 
              !is.na(coords_x_last), 
@@ -430,13 +566,14 @@ fun.pbp_prep <- function(data, prep_type) {
              seconds_since_last, distance_from_last, coords_x_last, coords_y_last,
              shift_ID, shift_length
              ) %>% 
-      filter(!is.na(shot_distance), 
+      dplyr::filter(!is.na(shot_distance),
              !is.na(shot_angle)
              ) %>% 
       data.frame()
     
   }
 }
+
 fun.model_prep <- function(data, prep_type) { 
   
   # Prep model data frames 
@@ -757,20 +894,20 @@ fun.pbp_full_add <- function(data, model_EV, model_UE, model_SH, model_EN) {
 }
 
 # Run
-pbp_full_list <- fun.pbp_full_add(data = pbp_raw, 
-                                  model_EV = xG_model_XGB_7_EV, 
-                                  model_UE = xG_model_XGB_7_UE, 
-                                  model_SH = xG_model_XGB_10_SH, 
-                                  model_EN = xG_model_XGB_10_EN
-                                  )
-
-
-# Return data from function
-pbp_df <-   pbp_full_list$pbp_full
-model_EV <- pbp_full_list$prep_EV
-model_UE <- pbp_full_list$prep_UE
-model_SH <- pbp_full_list$prep_SH
-model_EN <- pbp_full_list$prep_EN
+# pbp_full_list <- fun.pbp_full_add(data = pbp_raw,
+#                                   model_EV = xG_model_XGB_7_EV,
+#                                   model_UE = xG_model_XGB_7_UE,
+#                                   model_SH = xG_model_XGB_10_SH,
+#                                   model_EN = xG_model_XGB_10_EN
+#                                   )
+#
+#
+# # Return data from function
+# pbp_df <-   pbp_full_list$pbp_full
+# model_EV <- pbp_full_list$prep_EV
+# model_UE <- pbp_full_list$prep_UE
+# model_SH <- pbp_full_list$prep_SH
+# model_EN <- pbp_full_list$prep_EN
 
 
 

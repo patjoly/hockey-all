@@ -3,34 +3,44 @@
 #### --------------------------------------------------- ####
 
 
-# Required packages
-library(xgboost); require(dplyr)
+# Loading packages
+library(xgboost)
+library(dplyr)
 library(readr)
 library(Matrix)
 
-source('./xG/xG_preparation.R')
+source('./xG_preparation.R')
 
 options(scipen = 999)
 set.seed(250)
 
+use_original_R_data = TRUE
+use_original_R_data = FALSE
 
-year = 2021
-season = '03'
-# tm = 'MTL'
-tm = 'NHL'
-sub_folder = 'base'
-yyyy_yyyy = paste( year, year+1, sep='-')
-data_folder = file.path( Sys.getenv(c('HOMEPATH')), 'Data/Src/Hockey/NHL', yyyy_yyyy, season)
-setwd( file.path( data_folder, sub_folder ) )
-
-fname_base = paste( tm, '_', sub_folder, '_', yyyy_yyyy, '_', season, '.csv.gz', sep='' )
-pbp_part <- read_csv( fname_base, col_types = cols(away_on_7 = "c", home_on_7 = "c") )
+if (use_original_R_data) {
+  year = 2021
+  season = '03'
+  # tm = 'MTL'
+  tm = 'NHL'
+  sub_folder = 'base'
+  yyyy_yyyy = paste( year, year+1, sep='-')
+  data_folder = file.path( Sys.getenv(c('HOMEPATH')), 'Data/Src/Hockey/NHL', yyyy_yyyy, season)
+  orig_wd = setwd( file.path( data_folder, sub_folder ) )
+  fname_base = paste( tm, '_', sub_folder, '_', yyyy_yyyy, '_', season, '.csv.gz', sep='' )
+  pbp_part <- read_csv( fname_base, col_types = cols(away_on_7 = "c", home_on_7 = "c") )
+} else {
+  year = 2021
+  season = '02'
+  season = '03'
+  yyyy_yyyy = paste( year, year+1, sep='-')
+  data_folder = file.path( Sys.getenv(c('HOMEPATH')), 'Data/Src/Hockey/NHL', yyyy_yyyy, 'Py', season)
+  orig_wd = setwd( file.path( data_folder ) )
+  fname_base = paste( 'events', '_', year, '.csv.gz', sep='' )
+  pbp_part <- read_csv( fname_base, col_types = cols(away_on_7 = "n", home_on_7 = "n", details.servedByPlayerId = 'n') )
+}
 
 
 ### Objects ###
-c("SHOT",  "GOAL") -> st.shot_events
-c("SHOT", "GOAL", "MISS") -> st.fenwick_events
-c("SHOT", "GOAL", "MISS", "BLOCK" ) -> st.corsi_events
 c("3v3", "5v5", "4v4", "5v4", "4v5", 
   "5v3", "3v5", "4v3", "3v4", "5vE", 
   "Ev5", "4vE", "Ev4", "3vE", "Ev3") %>% as.factor() -> st.strength_states
@@ -40,7 +50,15 @@ c("5v4", "4v5", "5v3", "3v5", "4v3", "3v4",
 c("5v4", "4v5", "5v3", "3v5", "4v3", "3v4") %>% as.factor() -> st.pp_strength
 c("5vE", "Ev5", "4vE", "Ev4", "3vE", "Ev3") %>% as.factor() -> st.empty_net
 
-
+if (use_original_R_data) {
+  c("SHOT",  "GOAL") -> st.shot_events
+  c("SHOT", "GOAL", "MISS") -> st.fenwick_events
+  c("SHOT", "GOAL", "MISS", "BLOCK" ) -> st.corsi_events
+} else {
+  c('shot-on-goal', 'goal') -> st.shot_events
+  st.fenwick_events <- c('shot-on-goal', 'goal', 'missed-shot')
+  st.corsi_events   <- c('shot-on-goal', 'goal', 'missed-shot', 'blocked-shot' )
+}
 
 ## ----------------------------- ##
 ##  Current model prep process   ##
@@ -49,8 +67,13 @@ c("5vE", "Ev5", "4vE", "Ev4", "3vE", "Ev3") %>% as.factor() -> st.empty_net
 ### Please run the functions found the xG_preparation script prior to running of the following code.
 
 # Initla pbp prep - for both strength states
-pbp_part <- fun.pbp_expand(pbp_part)
-pbp_part <- fun.pbp_index(pbp_part)
+if (use_original_R_data) {
+  pbp_part <- fun.pbp_expand_Rscraped_data(pbp_part)
+  pbp_part <- fun.pbp_index_Rscraped_data(pbp_part)
+} else {
+  pbp_part <- fun.pbp_expand(pbp_part)
+  pbp_part <- fun.pbp_index(pbp_part)
+}
 
 # Create model data frames - EV
 pbp_prep_EV <- fun.pbp_prep(pbp_part, "EV")

@@ -3,36 +3,441 @@ Development Notes for my hockey-all repository
 	This is a repository I am modifying, mostly with the my-mods branch.
 
 
+Function and variable renames
+	pbp_expand()
+		could rename it to pbp_enhance() as expand is usually a data operation to convert a df to all the possible combination of the specified variables.
+		also do we need expand and index to be seperate functions? Could the index blocks be move to be in expand/enhance?
+
+
+Blocked shots
+	Block shots are interestingly recorded
+		- the event_team is the team that blocked the shot and the initial details.zoneCode is always 'D' but we change it in expand().
+		- thhe coords_* are from the spot the shot was blocked, not where the shot was made -- we don't know where the shot originated from.
+
+	For fenwick events, this means that we need to change the event_zone so that it aligns with the event_team. Otherwise, doesn't make much sense to have an event for a team that makes the shot happen in the Defensive zone.
+
+	In a way, a blocked shot is 2 events in one: a shot attempt by the offensive team (in the offensive zone -- not really a blocked shot if it came from outside the zone), and a block shot by the defensive team.
+
+	But we mostly want to treat it as a shot attempt -- which does not preclude us from the also counting blocked shots from the perspective of the defensive team. We could also split the event into 2 events --  one for the shot and one for the block -- if we wanted to. The Python data also provide info on who made the shot and who blocked it.
+
+	The only info we don't have are the coordinates from where the shot was made; the coords are those of where the shot was blocked.
+
+
+homeTeamDefendingSide
+	Describe it, see event_distance calculation description and move relevant comments here and refer back to this section, in the event_distance calculation description.
+
+
+xG_modelling.R
+	I added a conditional block that checks whether the data was fetched and parsed with the R scraper or with my python scraper. It then calls the proper function in xG_preparation.R to create the "expanded" df with the new columns we expect. After that block, we should have the same (or very similar columns).
+
+	In the spring and summer 2025, I fetched and re-parsed 2021 data with my Python repo -- and ultimately will likely do the same for the shorten 2020-2021 season -- such that I will eventually have no R parsed data for which I would not have the corresponding python data, so the R data will only be useful for reproducing the original model for comparison purposes.
+
+
 xG_preparation.R
-	fun.pbp_expand()
-		coords_x, coords_y and event_zone
-			coords_x is the length of the ice, coords_y is the width. The middle of either is 0.
+	Describing its structure and functions:
 
-			If we do 
-				table( pbp_part$coords_x, pbp_part$event_zone )
-			we see that -24 to 24 correspond to the Neu zone. And absolute values 25 to 99 correspond to the Def or Off zones.
+	fun.pbp_expand_Rscraped_data()
+		Thiis is the  original pbp_expand() function that I renamed.
 
-			Whether the event_zone is Off or Def depends on both the event_team and the period.
+		Similar function in EH_scrape_functions.R scraper
+			A similar function called sc.pbp_expand() exists in the EH_scrape_functions.R in the R scraper (devhockey1 repo)
+				. it was listed as  *** Still in testing *** and was not called by the scraper.
+				. it is almost identical except that:
+					- it seems a bit more recent with uses of case_when()
+					- does not update game_strength_state, home_skaters, away_skaters for penalty shots
+					- does not re-create the event_zone col -- see the description of event_zone below, I don't even know why fun.pbp_expand() does re-recreate event_zone in the first place
+					- important to re-emphasize the sc.pbp_expand() was never called by the scraper.
 
-			For instance, if we take 2021030111, the first event that is not in the neutral zone is shot attempt from Verhaeghe that goes wide. The event_team is FLA so the event_zone is offensive and the x coordinate is negative (-49).
+		General comment about fun.pbp_expand_Rscraped_data()
+			I should take fun.pbp_expand_Rscraped_data() with a grain of salt i.e. it is far from perfect. In replicating it as fun.pbp_expand() for the Python data, I used it to create the cols required to reproduce the XG model but changed many of them (e.g. event_distance) -- it is pretty badly and sadly coded.
 
-			So it would appear that in the first period, positive x coordinates denote the home team's defensive zone.
+		coords_x, coords_y
+			These cols already exist in the data -- recall that coords_x is the length of the ice, coords_y is the width. The middle of either is 0.
 
-			The next play is a hit from Fehervary (WAS), event_zone shows up as Def (makes sense) and the x coordinate is still negative (-91).
+			coords_x -- whether it represents a teams Off or Def zone changes each period
+				2025 09 13 update: TODO: reconsider/rewrite the description of what is below -- it is a bit old and not exactly accurate i.e. positive values of coords_x do not always denote the Defensive zone of the home team, it can change from one game to another. The Python data has a column named homeTeamDefendingSide containing the values of either lef/right (from the perspective of the scorekeepers' box I think) that changes across periods. If we didn't have it we could construct it based on average values of the coords_x in the 1st and 3rd period for the home team -- positive would mean 'right' and negative would mean 'left'.
 
-			If we switch to the first event of the 2nd period that is not in the neutral zone, it is a face off won by FLA and the event_zone is Off, the x coordinate is now positive (69). So we see that the x coordinates alternate at each period.
+				At the beginning of the game, positive x <=> home team's Defensive zone.
 
-	event_description_exists = "event_description" %in% names(data)
-		I added this boolean to differentiation between old data and new data
+				If we do
+					table( pbp_part$coords_x, pbp_part$event_zone )
+				we see that -24 to 24 correspond to the Neu zone. And absolute values 25 to 99 correspond to the Def or Off zones.
 
-	various columns created
+				Taking a game as an example, i.e. 2021030111 WSH at FLA, the first shot attempt that is not in the neutral zone is from Verhaeghe (a MISS that goes wide). The event_team is FLA so the event_zone is offensive (as we would expect) and the x coordinate is negative (-49). The next shot if from WAS, event_zone is again Off (as we would expect for a shot) and coords_x is now positive. All of the WSH shots in the 1st period have coords_x > 0. All of the FLA shots in the 1st period have a coords < 0.
+
+				So in the first period, positive x coordinates denote FLA's Def zone <=> WAS's Off zone. Since FLA is the home team, the game would seem to start with positive coords x being the Defensive zone of the home team. If we move the 2nd period, the first shot if from FLA (Montour) and the x coord is now positive.  This makes sense, teams switch side after the first period.
+
+				So every odd (even) numbered period, postive  x => Def of the home (away) team.
+				So every odd (even) numbered period, negative x => Off of the home (away) team.
+
+				Think hard about how to summarize this and ensure it's correct: so whether the event_zone is Off or Def based on the x coords depends on the period and which team's perspective the event is defined as (a FAC won, a HIT, a MISS, a BLOCK).
+
+				I eyeballed the above above with:
+					my_cols = c( 'game_id', 'home_team', 'game_period', 'event_description', 'event_team', 'event_zone', 'event_type', 'coords_x', 'coords_y', 'event_distance', 'pbp_distance', 'event_circle', 'event_angle' )
+					mask = pbp_part$event_type != 'CHANGE'
+					tmp <- pbp_part[ mask, my_cols]
+					mask2 = tmp$game_id == 2021030111
+					View( tmp[ mask2, c( 'game_period', 'home_team', 'event_description', 'event_team', 'event_type', 'event_zone', 'coords_x') ] )
+
+			Q: why does the function call as.character() and then as.numeric() on each? I copied the original column and the modified ones and they are identical:
+				data$event_description <- as.character(data$event_description)
+				data$coords_x_orig <- data$coords_x
+				data$coords_y_orig <- data$coords_y
+				data$coords_x <- as.numeric(as.character(data$coords_x))
+				data$coords_y <- as.numeric(as.character(data$coords_y))
+				# ... why are we converting to from numeric to char back to numeric? -- inspect the R data above
+				browser()
+				View( data[ c('coords_x_orig', 'coords_x') ] )
+				identical( data$coords_x_orig, data$coords_x  )
+				identical( data$coords_y_orig, data$coords_y  )
+				data[ , c('coords_x_orig', 'coords_y_orig') ] <- list(NULL)
+
+				Will ignore this as.numeric( as.character(...) ) conversion in my function for the python data.
+
 		event_circle
-			not sure that this one is
+			seems like an interesting variable although I am not sure I understand what it is designed to measure. It also seems to have impossible conditions e.g. coord_x < 0 & coords_x > 0 in the same condition.
+			TODO: call table() on that column to see the values it produced.
+			TODO: see the Evolving article on the expected goal model to see if they describe this metric.
+
+		event_rinkside
+			also interesting.
+			TODO: see the Evolving article on the expected goal model to see if they describe this metric.
 
 		event_zone
-			isn't it already defined? Add a break point there and inspect the data prior and after the mutate
+			that col was initially created in sc.events_HTM() from event_description as
+				event_zone = str_extract(event_description, "[a-zA-Z]{3}\\.\\s*[zZ]one") %>% gsub("\\.\\s*[zZ]one", "", .)
 
-			also not sure why we are replacing it as
-				event_zone = ifelse(event_zone == "Def" & event_type == "BLOCK", "Off", event_zone), 
+			fun.pbp_expand() in xG_preparation clobbers it as:
+				event_zone = ifelse((grepl("off. zone", tolower(event_description)) == TRUE), "Off",
+								 ifelse((grepl("neu. zone", tolower(event_description)) == TRUE), "Neu",
+										ifelse((grepl("def. zone", tolower(event_description)) == TRUE), "Def", NA))),
+				which we would expect would give identical results.
+
+				I temporarily replaced event_zone with event_zone2 in the mutate statement and compared with result with the event_zone created in the scraper's sc.events_HTM(). Results are indeed identical. I did so by inserting a browser() statement just before mutate() and called the function:
+					NvimR.selection()
+					pbp_part <- fun.pbp_expand(pbp_part)
+					n
+					hold <- hold %>% relocate( event_zone, .after = last_col() )
+					View(hold)
+					# ... they look identical
+					identical( hold$event_zone, hold$event_zone2 )
+					# ... they are identical
+
+			Adjustment for blocked shots and fenwick events
+				For blocked shots, the function modifies event_zone as:
+
+				event_zone = ifelse(event_zone == "Def" & event_type == "BLOCK", "Off", event_zone),
+					I viewed the data and this change does make sense. The event_description shows "Def. zone" for blocked shots while the event_team is always that of the team that made the shot, so the zone has to be switched.
+
+				See Blocked shots section for more detail on blocked shots.
+
+			Adjustment for fenwick events
+				There is another correction to event_zone that is made quite further down in the code -- I don't like that, begs the question why? why not make all ajustements to event_zone at the same place?
+
+				I also can't imagine the correction below changing any values. Are any shots, missed shots less than 64 feet away recorded as being shot from the Def zone? Seems weird to me:
+
+				event_zone = ifelse(event_type %in% st.fenwick_events & event_zone == "Def" & pbp_distance <= 64, "Off", event_zone)
+					I temporarily changed the above line to create event_zone2 and then compared it with event_zone
+						(ins)Browse[1]> identical( hold$event_zone, hold$event_zone2 )
+							[1] TRUE
+					... so let's ignore this replacement in my python data.
+
+			Python data -- block shots
+				With the Python data, the zone is recorded similary for blocked shots and we make the same correction to event_zone.
+
+		home_zone
+			constructed based on event_zone and mapped to be identical to it except if the event_team is the away team, in which case it's the opposite zone
+
+		pbp_distance
+			pbp_distance = suppressWarnings(as.numeric(sub(".*Zone, *(.*?) * ft.*", "\\1", event_description))),
+			pbp_distance = ifelse(event_type %in% st.fenwick_events & is.na(pbp_distance), 0, pbp_distance),
+
+			So it consists of the distance printed in the event_description and set to 0 for fenwick events if the description didn't specify it
+
+			We won't have it in the python data as there is no textual event description. (TODO: double check that this is correct, but pretty sure it is).
+
+			pbp_distance seems to be defined only for SHOT, MISS, GOAL and, eyeballing the data, it doesn't seem to be available or more precise anywhere that the calculated distance (event_distance) is na. So pretty useless it seems.
+
+			Its use seems to be help identify/confirm long shots which are accurately described in pbp_distance -- see the adjustment to event_distance below.
+
+		event_distance, event_angle
+			event_distance = sqrt((89 - abs(coords_x))^2 + coords_y^2),
+			event_angle = abs(atan(coords_y / (89 - abs(coords_x))) * (180 / pi)),
+
+			Pretty straightforward for both.
+
+			Let's compare event_distance and pbp_distance.
+
+			# Update distance calc for long shots (and various mistakes)
+			event_distance_updated = ifelse(event_type %in% st.fenwick_events &
+			# ... I temporarily renamed it so we can compare with event_distance, and then renamed it back to what it was
+
+			Let's compare event_distance_updated
+				my_cols = c( 'game_id', 'home_team', 'game_period', 'event_description', 'event_team', 'event_zone', 'event_type', 'coords_x', 'coords_y', 'event_distance', 'pbp_distance', 'event_distance_updated', 'event_circle', 'event_angle' )
+				mask = pbp_part$event_type != 'CHANGE'
+				tmp <- pbp_part[ mask, my_cols]
+				mask2 = !is.na(tmp$event_distance) & (tmp$event_distance != tmp$event_distance_updated)
+
+				View( tmp[ mask2, c( 'game_period', 'home_team', 'event_description', 'event_distance', 'event_distance_updated', 'pbp_distance', 'event_team', 'event_type', 'event_zone', 'coords_x') ] )
+
+			Ah, SHOT and MISS from from the other side of the red line would be calculation in relation to the wrong net, so the update to fix the event_distance for those long shots, we can eyeball the adjustment with.
+
+			For the python data, we will just have to find a way to adjust the event_distance while not having the benefit of pbp_distance -- could use the event_zone instead i.e. if the shot, miss, goal is from the event_team's defensive zone.
+
+		game_strength_state, home_skaters, away_skaters
+			There already exist but are updated for update penalty shots
+
+		home_zonestart
+			a column created in a subset df called face_index (i.e. for face-off index it seems) which is then merged with the data (only that column)
+
+			a face off index column is created which denotes sequences of corsi events that follow each face. For all rows in a sequence, home_zonestart is given the value 1 if that sequence started with a face off in the home team's defensive zone, 2 if it started and the neutral zone, and 3 if the sequence started in the home team's offensive zone.
+
+	fun.pbp_expand() -- Python data version
+		I renamed the original fun.pbp_expand() as fun.pbp_expand_Rscraped_data() so in this block of notes, fun.pbp_expand() refers to the Python data version of the function.
+
+		Some key changes
+			Renamed a few columns so that I don't have to change cols names everywhere in this script or in xG_modelling.R. Eventually I could rename those in the Python data parser (or not).
+
+			For any function I edited, I am removing most if not all print() statements, they are useless.
+
+		colnames(df)[colnames(df) == 'details.zoneCode'] <- 'event_zone'
+			zoneCode is provided by the json data (as O/D/N) -- only difference from R fetched/parsed data's event_zone is that it one letter instead of Off/Def/Neu
+
+			TODO: will have to check if the values are consistent with the R data version e.g. for blocked shots.
+
+		Coordinates and distance, angle calculations
+			The way I think about it, for the purpose of calculating shot distance and angle, the rink is a rectangle that 89 x 2 feet long (e.g. 188 feet) and 85 feet wide.
+				https://en.wikipedia.org/wiki/National_Hockey_League_rules
+
+			Then, we can imagine and area that get extend beyond those to be 11 feet in the negative, which would be beyond the goal line (i.e then end of that rectangle). For distance calculation, we would take the absolute value for these shots and the same y coordinate would apply.
+
+			For long shots, the approach that the Evolving dudes have taken to modify the distance and angle can be simplified.
+
+			The issue is simple: since the x coordinate is 0 at center ice we need to adjust that coordinate when shots are made from beyond the centre red line.
+
+			So before we even compute the distance and angle, I considered 2 approaches:
+
+			i) one that creates and adjusted coords_x column (adjusted for long shots)
+			ii) create a col representing feet from the goal line instead of a coordinate, we would just then use feet in the distance and angle calculation
+			- for coords_y, it is already in feet in relation to center of the ice, which also corresponds to feet from the middle of the net on the goal line -- so we already have a perfectly usable feet column for y
+
+			Feet from the goal line would be 89 - abs( coords_x) except that we need to augment it for long shots.
+
+			How do we identify which rows need to augmented?  I initially thought if could be as follows
+				df$is_long_shot = df$event_type %in% st.fenwick_events & df$event_zone == 'D'
+			but this misses long shots from the defensive side of the neutral zone. We would also need to make that boolean be TRUE for fenwick event from the defensive side of neutral zone.
+
+			It is when the sign of the x is not what we would expect depending on which net a team shots on in a given period.
+
+			I had initially coded this as how it appears below but the final version that works in the code is much simpler. See the code xG_preparation.py
+				df$fenwick_x_sign_home = ifelse( df$homeTeamDefendingSide == 'right', -1, 1 )
+				df$fenwick_x_sign_away = -1 * df$fenwick_x_sign_home
+				df$fenwick_x_sign_home = ifelse( df$homeTeamDefendingSide == 'right', 1 - (2 * (df$period %% 2)), -1 + (2 * (df$period %% 2)) )
+				# ... in the event that we no longer have homeTeamDefendingSide, we could take the average coords_x from the 1st and 3rd period to get the expected sign starting from period 1 and then apply a modulus function base on period (teams change sides each period including in regular season overtime)
+
+				df$is_long_shot_alt = ifelse( df$event_type %in% st.fenwick_events,
+											  ifelse ( df$event_team==df$home_team,
+													   df$coords_x * df$fenwick_x_sign_home < 0,
+													   df$coords_x * df$fenwick_x_sign_away < 0 ),
+											  FALSE )
+
+			I am keeping the use of the modulus function as in the code above just in case -- i.e. in case we no longer have the homeTeamDefendingSide column, we would the compute the average of the home team's coord_x in the first and period; the sign of that average would be the expectes sign for the home team in the first period. And sign teams switch side after each period, including the regular season overtime, we would use the modulus function applied to the period to create the fenwick_x_sign column.
+
+			Shots behind the net:
+				The distance is fine for events from behind the goal line as the distance turns negative beyond the goal line up to the board and we take the absolute value for the distance calculation.
+
+				I wonder if the angle makes sense though? The angle just < 90 immediately after the gl and gets smaller as abs( coords_x ) increases or abs( coords_y ) decreases. Is that what we want? i.e. would it behave in the same direction in terms of effect on an expected goal (intuitively speaking), i.e. a smaller angle should make for a better shot right? It's also possible that the angle behind the net would not matter much -- the model should probably just know that a given shot if from behind the net.
+
+				See .Rhistory for # 2025 09 12 -- looking into event_angle for shots behind the net: I inspected the data and we get identical distance and angle for those shots compared with the R-scraped 20212022 playoff data.
+
+	fun.pbp_index() -- Python data version
+		I removed 'season' everywhere as game_id is already unique across seasons
+		I renamed home/away_goalie to home/away_on_goalie
+		I renamed game_period to period
+
+		All of the above do not appear in xG_modelling.R -- so no impact there.
+
+		TODO: will have to do the same renames and deletion (i.e. of season) in fun.pbp_prep()
+
+	fun.pbp_full_add()
+		This function calls other functions; in addition to pbp_expand() and pbp_index(), it calls pbp_prep() and model_prep() that we haven't described yet.
+
+	Call to fun.pbp_full_add() at the end of the file -- commented out for now
+		The last statement in this file is a call to fun.pbp_full_add() with, as argument,  an unprocessed play-by-play df i.e. a df that has not been expand()'d nor index()'d.
+
+		I commented out this call given that:
+			1) we have not described pbp_full_add() yet
+			2) there is no df loaded in file at that point, so the call would raise an exception:
+				Error in eval(ei, envir) : object 'pbp_raw' not found
+			3) we don't need to call it yet to run xG_modelling.R
+
+
+R scraped data
+	2021-2022 season:
+		- I discovered in the spring of 2025 that the coord_* cols have NA for all team with dots in their abbrev. It's not just in the aggregated data, it's in the Src csv files for each game as well, so this is an issue. Solution: I am re-parsing the entire 2021 season my Python scraper.
+
+	event_team
+		event_team is created in EH_scrape_functions's sc.events_HTM() as
+			mutate(
+			  event_team = ifelse(event_type %in% c(sc.main_events, "CHL", "DELPEN"), str_extract(event_description, "^[A-Z]\\.[A-Z]|^[A-Z]+"), NA),
+			  event_team = ifelse(!event_team %in% Team_ID_vec, NA, event_team),  ## ensure event_team extacted is an actual team
+			  )
+
+		with
+			sc.main_events <- c("GOAL", "SHOT", "MISS", "BLOCK", "HIT", "GIVE", "TAKE", "FAC", "PENL")
+		and
+			Team_ID_vec <- c(
+			  "ANA", "ARI", "BOS", "BUF", "CAR", "CBJ", "CGY", "CHI", "COL", "DAL", "DET", "EDM", "FLA", "L.A", "MIN",
+			  "MTL", "N.J", "NSH", "NYI", "NYR", "OTT", "PHI", "PIT", "S.J", "STL", "T.B", "TOR", "VAN", "WPG", "WSH",
+			  "PHX", "ATL", "VGK", "L.V", "SEA"
+			  )
+
+		This works fine for very old data, but breaks at some point. Lets open the event from earch regular season and list the values encountered for event_team:
+
+		regular season 20202021
+			sort( unique( df$event_team ) )
+				 [1] "ANA" "ARI" "BOS" "BUF" "CAR" "CBJ" "CGY" "CHI" "COL" "DAL" "DET" "EDM" "FLA" "L.A" "MIN" "MTL" "N.J" "NSH" "NYI" "NYR" "OTT"
+				[22] "PHI" "PIT" "S.J" "STL" "T.B" "TOR" "VAN" "VGK" "WPG" "WSH"
+			sort( unique( df$home_team ) )
+				 [1] "ANA" "ARI" "BOS" "BUF" "CAR" "CBJ" "CGY" "CHI" "COL" "DAL" "DET" "EDM" "FLA" "L.A" "MIN" "MTL" "N.J" "NSH" "NYI" "NYR" "OTT"
+				[22] "PHI" "PIT" "S.J" "STL" "T.B" "TOR" "VAN" "VGK" "WPG" "WSH"
+			sort( unique( df$away_team ) )
+				 [1] "ANA" "ARI" "BOS" "BUF" "CAR" "CBJ" "CGY" "CHI" "COL" "DAL" "DET" "EDM" "FLA" "L.A" "MIN" "MTL" "N.J" "NSH" "NYI" "NYR" "OTT"
+				[22] "PHI" "PIT" "S.J" "STL" "T.B" "TOR" "VAN" "VGK" "WPG" "WSH"
+
+		regular season 20212022
+			sort( unique( df$event_team ) )
+				 [1] "ANA" "ARI" "BOS" "BUF" "CAR" "CBJ" "CGY" "CHI" "COL" "DAL" "DET" "EDM" "FLA" "LAK" "MIN"
+				[16] "MTL" "NJD" "NSH" "NYI" "NYR" "OTT" "PHI" "PIT" "SEA" "SJS" "STL" "TBL" "TOR" "VAN" "VGK"
+				[31] "WPG" "WSH"
+			sort( unique( df$home_team ) )
+				 [1] "ANA" "ARI" "BOS" "BUF" "CAR" "CBJ" "CGY" "CHI" "COL" "DAL" "DET" "EDM" "FLA" "LAK" "MIN"
+				[16] "MTL" "NJD" "NSH" "NYI" "NYR" "OTT" "PHI" "PIT" "SEA" "SJS" "STL" "TBL" "TOR" "VAN" "VGK"
+				[31] "WPG" "WSH"
+			sort( unique( df$away_team ) )
+				 [1] "ANA" "ARI" "BOS" "BUF" "CAR" "CBJ" "CGY" "CHI" "COL" "DAL" "DET" "EDM" "FLA" "LAK" "MIN"
+				[16] "MTL" "NJD" "NSH" "NYI" "NYR" "OTT" "PHI" "PIT" "SEA" "SJS" "STL" "TBL" "TOR" "VAN" "VGK"
+				[31] "WPG" "WSH"
+
+		regular season 20222023
+			sort( unique( df$event_team ) )
+				 [1] "ANA" "ARI" "BOS" "BUF" "CAR" "CBJ" "CGY" "CHI" "COL" "DAL" "DET" "EDM" "FLA" "LAK" "MIN"
+				[16] "MTL" "NJD" "NSH" "NYI" "NYR" "OTT" "PHI" "PIT" "SEA" "SJS" "STL" "TBL" "TOR" "VAN" "VGK"
+				[31] "WPG" "WSH"
+			sort( unique( df$home_team ) )
+				 [1] "ANA" "ARI" "BOS" "BUF" "CAR" "CBJ" "CGY" "CHI" "COL" "DAL" "DET" "EDM" "FLA" "LAK" "MIN"
+				[16] "MTL" "NJD" "NSH" "NYI" "NYR" "OTT" "PHI" "PIT" "SEA" "SJS" "STL" "TBL" "TOR" "VAN" "VGK"
+				[31] "WPG" "WSH"
+			sort( unique( df$away_team ) )
+				 [1] "ANA" "ARI" "BOS" "BUF" "CAR" "CBJ" "CGY" "CHI" "COL" "DAL" "DET" "EDM" "FLA" "LAK" "MIN"
+				[16] "MTL" "NJD" "NSH" "NYI" "NYR" "OTT" "PHI" "PIT" "SEA" "SJS" "STL" "TBL" "TOR" "VAN" "VGK"
+				[31] "WPG" "WSH"
+
+		regular season 20222023 -- with Python data (events_2022.cvs.gz file)
+			sort( unique( df$event_team ) )
+				NULL
+				Warning message:
+				Unknown or uninitialised column: `event_team`.
+			sort( unique( df$team.triCode ) )
+				 [1] "ANA" "ARI" "BOS" "BUF" "CAR" "CBJ" "CGY" "CHI" "COL" "DAL" "DET" "EDM" "FLA" "LAK" "MIN"
+				[16] "MTL" "NJD" "NSH" "NYI" "NYR" "OTT" "PHI" "PIT" "SEA" "SJS" "STL" "TBL" "TOR" "VAN" "VGK"
+				[31] "WPG" "WSH"
+			sort( unique( df$home_team ) )
+				 [1] "ANA" "ARI" "BOS" "BUF" "CAR" "CBJ" "CGY" "CHI" "COL" "DAL" "DET" "EDM" "FLA" "LAK" "MIN"
+				[16] "MTL" "NJD" "NSH" "NYI" "NYR" "OTT" "PHI" "PIT" "SEA" "SJS" "STL" "TBL" "TOR" "VAN" "VGK"
+				[31] "WPG" "WSH"
+			sort( unique( df$away_team ) )
+				 [1] "ANA" "ARI" "BOS" "BUF" "CAR" "CBJ" "CGY" "CHI" "COL" "DAL" "DET" "EDM" "FLA" "LAK" "MIN"
+				[16] "MTL" "NJD" "NSH" "NYI" "NYR" "OTT" "PHI" "PIT" "SEA" "SJS" "STL" "TBL" "TOR" "VAN" "VGK"
+				[31] "WPG" "WSH"
+
+	event_type - regular season 20202021
+		sort( unique( df$event_type ) )
+			 [1] "ANTHEM" "BLOCK"  "CHANGE" "CHL"    "DELPEN" "EGPID"  "EGT"    "EIEND"  "EISTR"  "FAC"    "GEND"   "GIVE"   "GOAL"   "GOFF"
+			[15] "HIT"    "MISS"   "PEND"   "PENL"   "PGEND"  "PGSTR"  "PSTR"   "SHOT"   "SOC"    "STOP"   "TAKE"
+
+		df[ df$event_type=='CHL', 'event_description' ]
+			# A tibble: 111 × 1
+			   event_description
+			   <chr>
+			 1 NYR Challenge - Interference on goalie -  Result: Goal overturned
+			 2 CHI Challenge - Interference on goalie -  Result: Goal upheld
+			 3 BOS Challenge - Interference on goalie -  Result: Disallowed goal upheld
+			 4 FLA Challenge - Offside -  Result: Goal overturned
+			 5 League Challenge - Interference on goalie -  Result: Disallowed goal overturned
+			 6 MTL Challenge - Interference on goalie -  Result: Disallowed goal overturned
+			 7 NYR Challenge - Offside -  Result: Goal overturned
+			 8 DET Challenge - Interference on goalie -  Result: Goal upheld
+			 9 L.A Challenge - Interference on goalie -  Result: Goal overturned
+			10 League Challenge - Interference on goalie -  Result: Disallowed goal upheld
+			# ℹ 101 more rows
+			# ℹ Use `print(n = ...)` to see more rows
+
+		df[ df$event_type=='EGPID', 'event_description' ]
+			# A tibble: 2 × 1
+			  event_description
+			  <chr>
+			1  
+			2  
+
+		df[ df$event_type=='EGT', 'event_description' ]
+			# A tibble: 2 × 1
+			  event_description
+			  <chr>
+			1  
+			2  
+
+		df[ df$event_type=='EISTR', 'event_description' ]
+			# A tibble: 1 × 1
+			  event_description
+			  <chr>
+			1 Early Intermission Start- Local time: 8:40 EST
+
+		df[ df$event_type=='EIEND', 'event_description' ]
+			# A tibble: 1 × 1
+			  event_description
+			  <chr>
+			1 Early Intermission End- Local time: 9:00 EST
+
+		df[ df$event_type=='GOFF', 'event_description' ]
+			# A tibble: 19 × 1
+			   event_description
+			   <chr>
+			 1  
+			 2  
+			 3  
+			 4  
+			 5  
+			 6  
+			 7  
+			 8  
+			 9  
+			10  
+			11  
+			12  
+			13  
+			14  
+			15  
+			16  
+			17  
+			18  
+			19  
+
+		df[ df$event_type=='SOC', 'event_description' ]
+			# A tibble: 72 × 1
+			   event_description
+			   <chr>
+			 1 Shootout Completed- Local time: 9:50 EST
+			 2 Shootout Completed- Local time: 9:50 MST
+			 3 Shootout Completed- Local time: 2:58 EST
+			 4 Shootout Completed- Local time: 10:45 CST
+			 5 Shootout Completed- Local time: 9:45 PST
+			 6 Shootout Completed- Local time: 9:47 PST
+			 7 Shootout Completed- Local time: 9:56 EST
+			 8 Shootout Completed- Local time: 9:48 EST
+			 9 Shootout Completed- Local time: 9:39 EST
+			10 Shootout Completed- Local time: 5:52 EST
+			# ℹ 62 more rows
+			# ℹ Use `print(n = ...)` to see more rows
 
 
