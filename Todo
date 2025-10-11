@@ -5,6 +5,10 @@ Next Steps:
 
 
 	xG_preparation.R:
+		. continue coding fun.pbp_prep() and fun.model_prep() for the other prep_types
+		. change the creation of the face off index to data.table syntax
+		. move all col creation that can be done in fun.pbp_expand() there e.g. score_state, is_home
+		. move the creation of all index cols to fun.pbp_index()
 
 
 Pad -- just a temporary section -- don't commit this

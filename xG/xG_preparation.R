@@ -183,8 +183,8 @@ fun.pbp_expand_Rscraped_data <- function(data) {
 
 fun.pbp_expand <- function(df) {
   # re-define event vectors
-  st.fenwick_events <- c('shot-on-goal', 'goal', 'missed-shot')
-  st.corsi_events   <- c('shot-on-goal', 'goal', 'missed-shot', 'blocked-shot' )
+  st.fenwick_events <- c('goal', 'shot-on-goal', 'missed-shot')
+  st.corsi_events   <- c('goal', 'shot-on-goal', 'missed-shot', 'blocked-shot')
 
   # renaming a few cols so that I don't have to change cols names everywhere in this script or in xG_modelling.R
   colnames(df)[colnames(df) == 'sit_strength']     <- 'game_strength_state'
@@ -192,6 +192,14 @@ fun.pbp_expand <- function(df) {
 	colnames(df)[colnames(df) == 'details.yCoord']   <- 'coords_y'
 	colnames(df)[colnames(df) == 'details.zoneCode'] <- 'event_zone'
   # ... zoneCode is provided by the json data (as O/D/N) -- only difference from R fetched/parsed data's event_zone is that it one letter instead of Off/Def/Neu
+
+  # cols that are missing from the json/Python data (taken from EH_scrape_functions.R)
+  df[ ,
+      `:=`(
+        home_score =   cumsum(event_type == 'goal' & event_team == home_team) - 1 * (event_type == 'goal' & event_team == home_team),
+        away_score =   cumsum(event_type == 'goal' & event_team == away_team) - 1 * (event_type == 'goal' & event_team == away_team)
+        ),
+      by = .(game_id) ]
 
   # Manny's enhanced pbp functions (from the dryscrape functions)
   df$event_circle <-
@@ -234,9 +242,25 @@ fun.pbp_expand <- function(df) {
   # TODO: for penalty shots: need to ensure we have the correct home/away_skaters (1 and 0) and correct game_strength_state ('Ev1' or '1vE')
 
   #
-  # Add home_zonestart for corsi events
+  # Sort the data and create event_index
+
+  df$order_previous <- 1:nrow(df)
+
+  # fix the priority col and sort
+  df$is_shoot_out = df$period == 5 & !('03' == substr( df$game_id, 5, 6 ))
+  # ... we don't have the session col for the events data
+  # df$is_shoot_out = df$period == 5 & df$season != '03'
+  df$priority = ifelse( df$event_type == 'delayed-penalty' & !df$is_shoot_out,  3,  df$priority )
+  df$priority = ifelse( df$event_type == 'penalty'         & !df$is_shoot_out,  5,  df$priority )
+  df$priority = ifelse( df$event_type == 'stoppage'        & !df$is_shoot_out,  5,  df$priority )
+  df$priority = ifelse( df$event_type == 'challenge'       & !df$is_shoot_out,  6,  df$priority )
+
+  df <- df[ order( df$game_id, df$period, df$game_seconds, df$priority, df$sortOrder, df$order_previous ), ]
 
   df$event_index <- 1:nrow(df)
+
+  #
+  # Add home_zonestart for corsi events
 
   face_index <- df %>%
     dplyr::filter(event_type %in% c(st.corsi_events, 'faceoff'),
@@ -305,47 +329,46 @@ fun.pbp_index_Rscraped_data <- function(data) {
                                            "face_index", "shift_index", "pen_index"))
 }
 
-fun.pbp_index <- function(data) { 
-  
+fun.pbp_index <- function(data) {
+
   # Add shift/penlaty indexes, adjust the faceoff_index for xG training, & create unique shift IDs
-  
-  pbp_hold <- data %>% 
-    arrange(game_id, event_index) %>% 
-    mutate(face_index =  cumsum(event_type == 'faceoff'), 
-           shift_index = cumsum(event_type == 'change-on'), 
+
+  pbp_hold <- data %>%
+    arrange(game_id, event_index) %>%
+    mutate(face_index =  cumsum(event_type == 'faceoff'),
+           shift_index = cumsum(event_type == 'change-on'),
            pen_index =   cumsum(event_type == 'penalty'))
-  
-  hold <- pbp_hold %>% 
+
+  hold <- pbp_hold %>%
     dplyr::filter(event_type %in% c('faceoff', 'goal', 'blocked-shot', 'shot', 'missed-shot', 'hit', 'takeaway', 'giveaway'),
            period < 5
-           ) %>% 
+           ) %>%
     group_by(game_id, period,
-             home_on_1, home_on_2, home_on_3, home_on_4, home_on_5, home_on_6, 
-             away_on_1, away_on_2, away_on_3, away_on_4, away_on_5, away_on_6, 
-             home_on_goalie, away_on_goalie, 
+             home_on_1, home_on_2, home_on_3, home_on_4, home_on_5, home_on_6,
+             away_on_1, away_on_2, away_on_3, away_on_4, away_on_5, away_on_6,
+             home_on_goalie, away_on_goalie,
              face_index, shift_index, pen_index
-             ) %>% 
+             ) %>%
     # ... original function had season after game_id, period but each game_id is unique, so not sure what season would have accomplished there
-    mutate(shift_ID = round(first(event_index) * as.numeric(game_id))) %>% 
-    summarise(shift_ID = first(shift_ID), 
-              shift_length = last(game_seconds) - first(game_seconds)) %>% 
-    ungroup() %>% 
-    select(game_id, period, shift_ID, face_index, 
+    mutate(shift_ID = round(first(event_index) * as.numeric(game_id))) %>%
+    summarise(shift_ID = first(shift_ID),
+              shift_length = last(game_seconds) - first(game_seconds)) %>%
+    ungroup() %>%
+    select(game_id, period, shift_ID, face_index,
            shift_index, pen_index, shift_length, home_on_1:away_on_goalie
-           ) %>% 
+           ) %>%
     data.frame()
-  
+
   join <- left_join(pbp_hold, hold, by = c('game_id',   'period',
-                                           'home_on_1', 'home_on_2', 'home_on_3', 
-                                           'home_on_4', 'home_on_5', 'home_on_6', 
-                                           'away_on_1', 'away_on_2', 'away_on_3', 
-                                           'away_on_4', 'away_on_5', 'away_on_6', 
-                                           'home_on_goalie', 'away_on_goalie', 
+                                           'home_on_1', 'home_on_2', 'home_on_3',
+                                           'home_on_4', 'home_on_5', 'home_on_6',
+                                           'away_on_1', 'away_on_2', 'away_on_3',
+                                           'away_on_4', 'away_on_5', 'away_on_6',
+                                           'home_on_goalie', 'away_on_goalie',
                                            'face_index',  'shift_index', 'pen_index'))
 }
 
-
-fun.pbp_prep <- function(data, prep_type) {
+fun.pbp_prep_Rscraped_data <- function(data, prep_type) {
   
   # Prepare pbp data for xG model training. 
   # prep_type can be either "EV", "UE", "SH", or "EN" depending on preferred strength state.  
@@ -574,7 +597,77 @@ fun.pbp_prep <- function(data, prep_type) {
   }
 }
 
-fun.model_prep <- function(data, prep_type) { 
+fun.pbp_prep <- function(dt, prep_type) {
+  # re-define event vectors
+  st.fenwick_events <- c('goal', 'shot-on-goal', 'missed-shot')
+  st.corsi_events   <- c('goal', 'shot-on-goal', 'missed-shot', 'blocked-shot')
+
+  # Prepare pbp data for xG model training.
+  # prep_type can be either 'EV', 'UE', 'SH', or 'EN' depending on preferred strength state.
+
+  # a few cols that need to be created regardless of the prep_type (i.e. strength state, is_home)
+  # TODO: consider moving the creation of these cols to fun.pbp_expand()
+  dt[ , is_home := 1 * (event_team == home_team) ]
+  dt$score_state <- ifelse( dt$is_home==TRUE, dt$home_score - dt$away_score, dt$away_score - dt$home_score)
+
+  # Tag events related to a penalty shot
+  dt$is_pen_shot <- grepl( '*-on-breakaway', dt$details.descKey, )
+  dt[ ,  is_pen_shot := any(is_pen_shot), by = .(game_id, game_seconds) ]
+  dt[  dt$event_type=='faceoff' & dt$is_pen_shot==TRUE, 'is_pen_shot' ] <- FALSE
+
+  dt$mask <- dt$event_type %in% c('faceoff', 'goal', 'blocked-shot', 'shot-on-goal', 'missed-shot', 'hit', 'takeaway', 'giveaway') &
+             ! ( dt$is_shoot_out | dt$is_pen_shot | is.na(dt$coords_x) | is.na(dt$coords_y) )
+
+  dt[ dt$mask==TRUE,
+      `:=`(
+        seconds_since_last  = game_seconds - lag(game_seconds),
+        event_type_last     = lag(event_type),
+        event_team_last     = lag(event_team),
+        event_strength_last = lag(game_strength_state),
+        coords_x_last       = lag(coords_x),
+        coords_y_last       = lag(coords_y)
+        ),
+      by = .(game_id, period) ]
+
+  if(prep_type == 'EV') {
+    dt$mask2 <- dt$mask==TRUE & dt$event_type %in% st.fenwick_events & dt$game_strength_state %in% st.even_strength
+
+    dt[ dt$mask2==TRUE,
+        `:=`(
+          same_team_last = 1 * (event_team == event_team_last),
+          distance_from_last = sqrt((coords_x - coords_x_last)^2 + (coords_y - coords_y_last)^2)
+          ) ]
+
+    colnames(dt)[colnames(dt) == 'event_distance']    <- 'shot_distance'
+    colnames(dt)[colnames(dt) == 'event_angle']       <- 'shot_angle'
+
+    # other renames from the Python data
+    colnames(dt)[colnames(dt) == 'sit_nskaters_home'] <- 'home_skaters'
+    colnames(dt)[colnames(dt) == 'sit_nskaters_away'] <- 'away_skaters'
+    colnames(dt)[colnames(dt) == 'details.shotType']  <- 'event_detail'
+
+    dt[ dt$mask2==TRUE,
+        .( game_id, event_index, season, period, game_seconds,
+           game_strength_state, score_state, is_home,
+           details.shootingPlayerId, home_on_goalie, away_on_goalie,
+           home_score, away_score, home_team, away_team, home_skaters, away_skaters,
+           event_team, event_type, event_detail,
+           coords_x, coords_y, shot_distance, shot_angle,
+           event_team_last, same_team_last, event_strength_last, event_type_last,
+           seconds_since_last, distance_from_last, coords_x_last, coords_y_last,
+           shift_ID, shift_length
+           )
+        ]
+  }
+  else if(prep_type == 'UE') {
+  }
+  else if(prep_type == 'SH') {
+  }
+  else if(prep_type == 'EN') {
+  }
+}
+
+fun.model_prep_Rscraped_data <- function(data, prep_type) {
   
   # Prep model data frames 
   # prep_type can be "EV", "UE", "SH", or "EN". 
@@ -791,6 +884,70 @@ fun.model_prep <- function(data, prep_type) {
              prior_shot_same:prior_face) %>% 
       data.matrix()
     
+  }
+}
+
+fun.model_prep <- function(data, prep_type) {
+
+  # Prep model data frames
+  # prep_type can be 'EV', 'UE', 'SH', or 'EN'.
+
+  if(prep_type == 'EV') {
+
+    # Create EV dummy variables, returns a matrix.
+    model_prep <- data %>%
+      mutate(is_goal = 1 * (event_type == 'goal'),
+
+             state_5v5 = 1 * (game_strength_state == '5v5'),
+             state_4v4 = 1 * (game_strength_state == '4v4'),
+             state_3v3 = 1 * (game_strength_state == '3v3'),
+
+             score_down_4 = 1 * (score_state <= -4),
+             score_down_3 = 1 * (score_state == -3),
+             score_down_2 = 1 * (score_state == -2),
+             score_down_1 = 1 * (score_state == -1),
+             score_even   = 1 * (score_state ==  0),
+             score_up_1   = 1 * (score_state ==  1),
+             score_up_2   = 1 * (score_state ==  2),
+             score_up_3   = 1 * (score_state ==  3),
+             score_up_4   = 1 * (score_state >=  4),
+
+             wrist_shot =     1 * (event_detail == 'wrist'),
+             deflected_shot = 1 * (event_detail == 'deflected'),
+             tip_shot =       1 * (event_detail == 'tip-In'),
+             slap_shot =      1 * (event_detail == 'slap'),
+             backhand_shot =  1 * (event_detail == 'backhand'),
+             snap_shot =      1 * (event_detail == 'snap'),
+             wrap_shot =      1 * (event_detail == 'wrap-around'),
+
+             prior_shot_same =  1 * (event_type_last == 'shot-on-goal' & same_team_last == 1),
+             prior_miss_same =  1 * (event_type_last == 'missed-shot'  & same_team_last == 1),
+             prior_block_same = 1 * (event_type_last == 'blocked-shot' & same_team_last == 1),
+             prior_shot_opp =   1 * (event_type_last == 'shot-on-goal' & same_team_last == 0),
+             prior_miss_opp =   1 * (event_type_last == 'missed-shot'  & same_team_last == 0),
+             prior_block_opp =  1 * (event_type_last == 'blocked-shot' & same_team_last == 0),
+
+             prior_give_opp =  1 * (event_type_last == 'giveaway' & same_team_last == 0),
+             prior_give_same = 1 * (event_type_last == 'giveaway' & same_team_last == 1),
+             prior_take_opp =  1 * (event_type_last == 'takeaway' & same_team_last == 0),
+             prior_take_same = 1 * (event_type_last == 'takeaway' & same_team_last == 1),
+             prior_hit_opp =   1 * (event_type_last == 'hit' & same_team_last == 0),
+             prior_hit_same =  1 * (event_type_last == 'hit' & same_team_last == 1),
+             prior_face =      1 * (event_type_last == 'faceoff')
+             ) %>%
+      select(is_goal,
+             shot_distance, shot_angle, is_home,
+             state_5v5:state_3v3,
+             score_down_4:score_up_4,
+             game_seconds, period, coords_x, coords_y, coords_x_last, coords_y_last,
+             wrist_shot:wrap_shot, distance_from_last, seconds_since_last,
+             prior_shot_same:prior_face
+             ) %>%
+      data.matrix()
+
+  }
+  else if(prep_type == 'UE') {
+
   }
 }
 

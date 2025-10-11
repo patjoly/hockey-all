@@ -27,6 +27,62 @@ homeTeamDefendingSide
 	Describe it, see event_distance calculation description and move relevant comments here and refer back to this section, in the event_distance calculation description.
 
 
+priority and sortOrder
+	The priority col:
+		. is added in devpynhl (nhl_fetch.py) to sort the df after the play-by-play (events data) is merged with the change events. The sortOrder is provided by the json data.
+	sortOrder col:
+		. provided With the python / json data so we can/should also use it to sort/index the data -- but is not defined for our chnage events.
+	event_index col:
+		. in fun.pbp_expand() we create the event_index col to have an index of all events per game_id but when looking at the order based on the priority col, I noticed a few oddities.
+		. I also retain the original order, not sure that it matters -- would only affect my change events I think
+
+	If we need to continue to modify the priority column, it would be in pbp_expand() -- and eventually in nhl_fetch once we are confident that we have an order that works.
+
+
+	In nhl_fetch.py, we create it as:
+
+    df_enhanced_events[ 'priority' ] = (
+        1  * (ser_event.isin( [ 'takeaway', 'giveaway', 'missed-shot', 'hit', "shot-on-goal", 'blocked-shot']) & ~( (ser_period == 5) & (session == "R" ))) +
+        2  * ((ser_event == "goal")             & ~( (ser_period == 5) & (session == "R"))) +
+        3  * ((ser_event == "stoppage")         & ~( (ser_period == 5) & (session == "R"))) +
+        4  * ((ser_event == "challenge")        & ~( (ser_period == 5) & (session == "R"))) +
+        5  * ((ser_event == "delayed-penalty")  & ~( (ser_period == 5) & (session == "R"))) +
+        6  * ((ser_event == "penalty")          & ~( (ser_period == 5) & (session == "R"))) +
+        7  * ((ser_event == "period-end")       & ~( (ser_period == 5) & (session == "R"))) +
+        8  * ((ser_event == "game-end")         & ~( (ser_period == 5) & (session == "R"))) +
+        9  * ((ser_event == "change-off")       & ~( (ser_period == 5) & (session == "R"))) +
+        10 * ((ser_event == "change-on")        & ~( (ser_period == 5) & (session == "R"))) +
+        11 * ((ser_event == "period-start")     & ~( (ser_period == 5) & (session == "R"))) +
+        12 * ((ser_event == "faceoff")          & ~( (ser_period == 5) & (session == "R")))
+        )
+
+	The hit (priority 1) and shot-on-goal (1), hit (1) and takeaway (1) are consistent with the values of sortOrder in a few spots. Also stoppage (priority 3) and penalty (6) sometimes -- also, I think that penalty equates to a stoppage but cannot be certain TODO check how frequent they happen individually and together.
+
+	I find it odd that delayed-penalty was after stoppage: in the same game_second, wouldn't it impossible to have a delayed-penalty after a stoppage? and if they occur at the same time, would still make sense to treat the delayed penalty as having occurred prior to the stoppage.
+
+	For a moment I thougth that changing the priority for stoppage to 7 could solve it but it doesn't, as sometimes there is penalty then stoppage, sometimes vice-versa (according to sortOrder). So then I thougth that perhaps penalties and stoppage should have the same priority (i.e. 6) and we would let sortOrder determine the proper order. We would not need to change any priority for events that have the same priority (sortOrder) would take care of it.
+
+	See in fun.pbp_expand() how I am currently ordering the priority.
+
+	Can check whether the order makes sense just after creating event_index:
+		df$sortOrder_diff = df$sortOrder - lag( df$sortOrder )
+		df$game_seconds_diff = df$game_seconds - lag( df$game_seconds )
+		df[ df$sortOrder_diff < 0, 'sortOrder_diff_l0' ] <- TRUE
+		df <- df[ ,  sortOrder_diff_l0_gs := any(sortOrder_diff_l0), by = .(game_id, game_seconds) ]
+		browser()
+		my_cols = c('game_id', 'period', 'game_seconds', 'priority', 'event_type', 'details.reason', 'eventId', 'sortOrder', 'order_previous', 'sortOrder_diff', 'game_seconds_diff')
+		View( df[ df$sortOrder_diff_l0_gs==TRUE, ..my_cols ] )
+
+	This block is a bit old -- keep it for a bit and only retain what is needed:
+		After than fix, there are some conflicts between priority and sort_order -- examples, according to sortOrder instead of priority:
+			stoppage before a hit -- this one is very frequent -- my priority precedence would be inconsequential I think
+			delayed-penalty before a hit -- my priority precedence would be inconsequential I think
+			penalty before a hit -- my priority precedence would be inconsequential I think
+			penalty before a shot-on-goal -- a bit weird, look into it, is it a penalty shot?
+			penalty before a goal -- a bit weird, look into it, is it a penalty shot?
+			penalty before a takeaway  -- a bit weird, look into it
+
+
 xG_modelling.R
 	I added a conditional block that checks whether the data was fetched and parsed with the R scraper or with my python scraper. It then calls the proper function in xG_preparation.R to create the "expanded" df with the new columns we expect. After that block, we should have the same (or very similar columns).
 
@@ -270,6 +326,71 @@ xG_preparation.R
 			2) there is no df loaded in file at that point, so the call would raise an exception:
 				Error in eval(ei, envir) : object 'pbp_raw' not found
 			3) we don't need to call it yet to run xG_modelling.R
+
+	fun.pbp_prep()
+		Order of events and the priority col
+			. I noticed that the order of the events did not seem accurate, I fixed the order by clobbering the priority column
+			. see the section called 'priority and sortOrder' in these notes for more info and to note any further adjustment that may be required
+
+		Penalty shots -- # Tag events related to a penalty shot
+			. in the R scrapped data, penalty shots are identified based on the string in event_description (which states 'penalty shot')
+			. in the Python/json data, we don't have that col but the penalties that give rise to a penalty shot all have '*on-breakaway' in their reason (could be secondaryReason).
+				- the penalty, the shift changes, the shot or goal, the ensuing faceoff -- all happen at the very same game_second, makes sense the clock doesn't run during a penalty shot
+				- the faceoff at that game_second is actually the faceoff from the play resuming after the pen shot and so should not be considered related to the penshot -- just like a regular face off after a penalty call
+
+		There were a few weird conditions, I checked them and decided to omit them
+			# View() events where the following condition is met:
+			#   !(coords_x == 0 & coords_y == 0 & event_type %in% st.corsi_events &
+			#   (pbp_distance != 90 & event_type %in% st.fenwick_events))
+
+			browser()
+			boole_1 <- dt$coords_x == 0 & dt$coords_y == 0 & dt$event_type %in% st.corsi_events
+			boole_2 <- dt$event_distance != 90 & dt$event_type %in% st.fenwick_events
+			# boole_1_2 <- pbp_distance != 90 & event_type %in% st.fenwick_events
+			# we don't have pbp_distance (which are always integers)
+			dt$boole <- boole_1 & boole_2
+			my_cols <- c('game_id', 'period', 'game_seconds', 'event_type', 'event_distance')
+			glimpse( dt[ dt$boole, ..my_cols ] )
+			# ... i.e. are there any? If not we don't need that condition
+			# ... doesn't match anywhere
+
+			# View some of the cols created:
+			my_cols = c('game_id', 'period', 'game_seconds', 'event_index', 'event_type', 'seconds_since_last', 'event_type_last', 'event_team_last', 'event_strength_last', 'coords_x_last', 'details.reason', 'sortOrder', 'order_previous')
+			View( dt[ , ..my_cols ] )
+
+		Other changes from the R scraper version
+			. in the first mask, they had removed period < 5 but here I just exclude shootouts, otherwise won't work for playoffs.
+			. in the block for the 2nd mask, I actually moved the creation of many columns to way above as they apply to all prep_type's
+				. they replace event_detail as being a 'wrist' shot if it is NA -- fair assumption? is it frequently missing?
+					TODO: table ( dt$event_detail, useNA = "ifany" ) and look into it
+				. Q: couldn't they all be created outside of the condition block for prep_type? That would further simply that function.
+					TODO: look into it.
+
+				# is_home        = 1 * (event_team == home_team),
+				# score_state    = ifelse(is_home==TRUE, home_score - away_score, away_score - home_score),
+				# event_detail = ifelse(is.na(event_detail), "Wrist", event_detail),
+				# TODO: we don't have event_detail see which col would be appropriate -- although... it is a weird replacement?
+				# dt$score_state <- ifelse(  dt$mask==TRUE & dt$mask2==TRUE,
+				#                            ifelse( dt$is_home==TRUE, dt$home_score - dt$away_score, dt$away_score - dt$home_score),
+				#                            NA )
+
+		Lag function:
+			. the lag() function used is dplyr's. The plan is in the long-run is to stop using dplyr for these function -- unless I really need to.
+			. I think the stat package has a lag method as well, could we use that one instead?
+				?stats::lag
+				?dplyr::lag
+				TODO: specify that stats:: name space and see if we get the same results
+
+	Columns not returned:
+		game_date -- pretty sure we don't need it
+		event_description -- pretty sure we don't need it
+		pbp_distance -- pretty sure we don't need it
+		game_score_state -- what would be the difference with score_state? look into it
+
+    Used the Python data names for columns:
+		details.shootingPlayerId instead of event_player_1
+		home_on_goalie instead of home_goalie
+		away_on_goalie instead of away_goalie
 
 
 R scraped data

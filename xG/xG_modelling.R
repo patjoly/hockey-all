@@ -8,6 +8,7 @@ library(xgboost)
 library(dplyr)
 library(readr)
 library(Matrix)
+library(data.table)
 
 source('./xG_preparation.R')
 
@@ -37,6 +38,7 @@ if (use_original_R_data) {
   orig_wd = setwd( file.path( data_folder ) )
   fname_base = paste( 'events', '_', year, '.csv.gz', sep='' )
   pbp_part <- read_csv( fname_base, col_types = cols(away_on_7 = "n", home_on_7 = "n", details.servedByPlayerId = 'n') )
+  pbp_part <- as.data.table( pbp_part )
 }
 
 
@@ -70,14 +72,16 @@ if (use_original_R_data) {
 if (use_original_R_data) {
   pbp_part <- fun.pbp_expand_Rscraped_data(pbp_part)
   pbp_part <- fun.pbp_index_Rscraped_data(pbp_part)
+  pbp_prep_EV <- fun.pbp_prep_Rscraped_data(pbp_part, 'EV')
+  # Create model data frames - EV
+  model_prep_EV <- fun.model_prep_Rscraped_data(pbp_prep_EV, 'EV')
 } else {
   pbp_part <- fun.pbp_expand(pbp_part)
   pbp_part <- fun.pbp_index(pbp_part)
+  pbp_prep_EV <- fun.pbp_prep(pbp_part, 'EV')
+  # Create model data frames - EV
+  model_prep_EV <- fun.model_prep(pbp_prep_EV, 'EV')
 }
-
-# Create model data frames - EV
-pbp_prep_EV <- fun.pbp_prep(pbp_part, "EV")
-model_prep_EV <- fun.model_prep(pbp_prep_EV, "EV") 
 
 
 # For the purpose of this script, the other strength states (PP, SH, EN) will not be shown. If one 
