@@ -2,16 +2,13 @@
 ## -       xG Preparation Functions     |   06.02.18     - ##
 #### --------------------------------------------------- ####
 
-
 # Loading packages
 library(xgboost)
 library(dplyr)
 library(stringr)
 
-
 options(scipen = 999)
 set.seed(250)
-
 
 ## Objects
 st.fenwick_events <- c("SHOT", "GOAL", "MISS") 
@@ -20,8 +17,6 @@ st.even_strength <- c("5v5", "4v4", "3v3") %>% as.factor()
 st.uneven_strength <- c("5v4", "4v5", "5v3", "3v5", "4v3", "3v4", "5vE", "Ev5", "4vE", "Ev4", "3vE", "Ev3") %>% as.factor()
 st.pp_strength <- c("5v4", "4v5", "5v3", "3v5", "4v3", "3v4") %>% as.factor()
 st.empty_net <- c("5vE", "Ev5", "4vE", "Ev4", "3vE", "Ev3") %>% as.factor()
-
-
 
 
 ## ----------------------- ##
@@ -182,6 +177,11 @@ fun.pbp_expand_Rscraped_data <- function(data) {
 }
 
 fun.pbp_expand <- function(df) {
+
+  # Prepares play by play data for the xG model. These variables are not xG specific and can be used for other tasks.
+  # Variables: event_circle, event_rinkside, event_zone, home_zone, pbp_distance, event_distance, event_angle,
+  # game_strength_state, home_skaters, away_skaters. Additionally, a faceoff index is added for later joins.
+
   # re-define event vectors
   st.fenwick_events <- c('goal', 'shot-on-goal', 'missed-shot')
   st.corsi_events   <- c('goal', 'shot-on-goal', 'missed-shot', 'blocked-shot')
@@ -262,24 +262,15 @@ fun.pbp_expand <- function(df) {
   #
   # Add home_zonestart for corsi events
 
-  face_index <- df %>%
-    dplyr::filter(event_type %in% c(st.corsi_events, 'faceoff'),
-           period < 5
-           ) %>%
-    arrange(game_id, event_index) %>%
-    mutate(face_index = cumsum(event_type == 'faceoff')) %>%
-    group_by(game_id, face_index) %>%
-    arrange(event_index) %>%
-    mutate(test = first(home_zone),
-           home_zonestart = ifelse(first(home_zone) == 'D', 1,
-                                   ifelse(first(home_zone) == 'N', 2,
-                                          ifelse(first(home_zone) == 'O', 3, NA)))
-           ) %>%
-    ungroup() %>%
-    select(game_id, event_index, home_zonestart) %>%
-    data.frame()
+  df$mask = df$event_type %in% c(st.corsi_events, 'faceoff') & ! df$is_shoot_out
+  df[ mask==TRUE, face_index := cumsum(event_type == 'faceoff') ]
+  df[ mask==TRUE,
+      home_zonestart := ifelse(first(home_zone) == 'D', 1,
+                               ifelse(first(home_zone) == 'N', 2,
+                                      ifelse(first(home_zone) == 'O', 3, NA))),
+      by = .(game_id, face_index) ]
 
-  df <- left_join(df, face_index, by = c('game_id', 'event_index'))
+  df[, !c('mask'), with = FALSE]
 }
 
 fun.pbp_index_Rscraped_data <- function(data) { 
@@ -333,39 +324,44 @@ fun.pbp_index <- function(data) {
 
   # Add shift/penlaty indexes, adjust the faceoff_index for xG training, & create unique shift IDs
 
-  pbp_hold <- data %>%
-    arrange(game_id, event_index) %>%
-    mutate(face_index =  cumsum(event_type == 'faceoff'),
-           shift_index = cumsum(event_type == 'change-on'),
-           pen_index =   cumsum(event_type == 'penalty'))
+  # we'll just create a copy for now and compare the columns
+  df <- as.data.table( data )
+  df <- df[ order( game_id, event_index ) ]
 
-  hold <- pbp_hold %>%
-    dplyr::filter(event_type %in% c('faceoff', 'goal', 'blocked-shot', 'shot', 'missed-shot', 'hit', 'takeaway', 'giveaway'),
-           period < 5
-           ) %>%
-    group_by(game_id, period,
-             home_on_1, home_on_2, home_on_3, home_on_4, home_on_5, home_on_6,
-             away_on_1, away_on_2, away_on_3, away_on_4, away_on_5, away_on_6,
-             home_on_goalie, away_on_goalie,
-             face_index, shift_index, pen_index
-             ) %>%
-    # ... original function had season after game_id, period but each game_id is unique, so not sure what season would have accomplished there
-    mutate(shift_ID = round(first(event_index) * as.numeric(game_id))) %>%
-    summarise(shift_ID = first(shift_ID),
-              shift_length = last(game_seconds) - first(game_seconds)) %>%
-    ungroup() %>%
-    select(game_id, period, shift_ID, face_index,
-           shift_index, pen_index, shift_length, home_on_1:away_on_goalie
-           ) %>%
-    data.frame()
+  df[ ,
+      `:=`(
+        face_index =  cumsum( event_type == 'faceoff'   ),
+        shift_index = cumsum( event_type == 'change-on' ),
+        pen_index =   cumsum( event_type == 'penalty'   )
+        ) ]
 
-  join <- left_join(pbp_hold, hold, by = c('game_id',   'period',
-                                           'home_on_1', 'home_on_2', 'home_on_3',
-                                           'home_on_4', 'home_on_5', 'home_on_6',
-                                           'away_on_1', 'away_on_2', 'away_on_3',
-                                           'away_on_4', 'away_on_5', 'away_on_6',
-                                           'home_on_goalie', 'away_on_goalie',
-                                           'face_index',  'shift_index', 'pen_index'))
+  df$mask <-  df$event_type %in% c('faceoff', 'goal', 'blocked-shot', 'shot', 'missed-shot', 'hit', 'takeaway', 'giveaway') & df$period < 5
+  # TODO: will replace period < 5 with ! $is_shoot_out
+  # also consider using setkey -- perhaps the by will be faster that way
+  # also note that the reason I am using a join rather than nafill() is that I would have to call nafill() twice - once with 'locf' and another call with 'nocb' (not sure its the right name)
+
+  by_cols = c('game_id', 'period',
+              'home_on_1', 'home_on_2', 'home_on_3', 'home_on_4', 'home_on_5', 'home_on_6', 'home_on_goalie',
+              'away_on_1', 'away_on_2', 'away_on_3', 'away_on_4', 'away_on_5', 'away_on_6', 'away_on_goalie',
+              'face_index', 'shift_index', 'pen_index')
+
+  df[ mask==TRUE,
+      shift_ID := round( first(event_index) * as.numeric(game_id) ),
+      by = by_cols
+      ]
+
+  df_tojoin <- df[  mask==TRUE,
+                    .(
+                      shift_ID     = first(shift_ID),
+                      shift_length = last(game_seconds) - first(game_seconds)
+                      ),
+                    by = by_cols
+                    ]
+  df$shift_ID <- NULL
+
+  df <- left_join(df, df_tojoin, by = by_cols )
+
+  df[, !c('mask'), with = FALSE]
 }
 
 fun.pbp_prep_Rscraped_data <- function(data, prep_type) {
@@ -598,12 +594,21 @@ fun.pbp_prep_Rscraped_data <- function(data, prep_type) {
 }
 
 fun.pbp_prep <- function(dt, prep_type) {
+
+  # Prepare pbp data for xG model training.
+  # prep_type can be either 'EV', 'UE', 'SH', or 'EN' depending on preferred strength state.
+
   # re-define event vectors
   st.fenwick_events <- c('goal', 'shot-on-goal', 'missed-shot')
   st.corsi_events   <- c('goal', 'shot-on-goal', 'missed-shot', 'blocked-shot')
 
-  # Prepare pbp data for xG model training.
-  # prep_type can be either 'EV', 'UE', 'SH', or 'EN' depending on preferred strength state.
+  # a few renames
+  colnames(dt)[colnames(dt) == 'event_distance']    <- 'shot_distance'
+  colnames(dt)[colnames(dt) == 'event_angle']       <- 'shot_angle'
+  # other renames from the Python data
+  colnames(dt)[colnames(dt) == 'sit_nskaters_home'] <- 'home_skaters'
+  colnames(dt)[colnames(dt) == 'sit_nskaters_away'] <- 'away_skaters'
+  colnames(dt)[colnames(dt) == 'details.shotType']  <- 'event_detail'
 
   # a few cols that need to be created regardless of the prep_type (i.e. strength state, is_home)
   # TODO: consider moving the creation of these cols to fun.pbp_expand()
@@ -620,12 +625,12 @@ fun.pbp_prep <- function(dt, prep_type) {
 
   dt[ dt$mask==TRUE,
       `:=`(
-        seconds_since_last  = game_seconds - lag(game_seconds),
-        event_type_last     = lag(event_type),
-        event_team_last     = lag(event_team),
-        event_strength_last = lag(game_strength_state),
-        coords_x_last       = lag(coords_x),
-        coords_y_last       = lag(coords_y)
+        seconds_since_last  = game_seconds - shift(game_seconds),
+        event_type_last     = shift(event_type),
+        event_team_last     = shift(event_team),
+        event_strength_last = shift(game_strength_state),
+        coords_x_last       = shift(coords_x),
+        coords_y_last       = shift(coords_y)
         ),
       by = .(game_id, period) ]
 
@@ -637,14 +642,6 @@ fun.pbp_prep <- function(dt, prep_type) {
           same_team_last = 1 * (event_team == event_team_last),
           distance_from_last = sqrt((coords_x - coords_x_last)^2 + (coords_y - coords_y_last)^2)
           ) ]
-
-    colnames(dt)[colnames(dt) == 'event_distance']    <- 'shot_distance'
-    colnames(dt)[colnames(dt) == 'event_angle']       <- 'shot_angle'
-
-    # other renames from the Python data
-    colnames(dt)[colnames(dt) == 'sit_nskaters_home'] <- 'home_skaters'
-    colnames(dt)[colnames(dt) == 'sit_nskaters_away'] <- 'away_skaters'
-    colnames(dt)[colnames(dt) == 'details.shotType']  <- 'event_detail'
 
     dt[ dt$mask2==TRUE,
         .( game_id, event_index, season, period, game_seconds,
@@ -1065,8 +1062,6 @@ fun.pbp_full_add <- function(data, model_EV, model_UE, model_SH, model_EN) {
 # model_UE <- pbp_full_list$prep_UE
 # model_SH <- pbp_full_list$prep_SH
 # model_EN <- pbp_full_list$prep_EN
-
-
 
 
 ##### ----------------------                END                ---------------------- #####               

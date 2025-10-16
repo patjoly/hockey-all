@@ -306,6 +306,29 @@ xG_preparation.R
 
 				See .Rhistory for # 2025 09 12 -- looking into event_angle for shots behind the net: I inspected the data and we get identical distance and angle for those shots compared with the R-scraped 20212022 playoff data.
 
+		home_zonestart
+			I had initially "translated" to data.table syntax the tidyverse block that creates the home_zonestart in a subset df and then joins it, but realized... why create a subset data set and join? Perhaps that's the tidyverse way but all we are doing is create a new column here, albeit by groups but that's easy to do with data.table's. I just want to keep the code for how I initially translated it. I had:
+
+			df_fo = as.data.table( df )
+			df_fo$mask = df_fo$event_type %in% c(st.corsi_events, 'faceoff') & ! df_fo$is_shoot_out
+			df_fo[ mask==TRUE, face_index := cumsum(event_type == 'faceoff') ]
+			df_fo[ mask==TRUE,
+			`:=`(
+			  test = first(home_zone),
+			  home_zonestart = ifelse(first(home_zone) == 'D', 1,
+									   ifelse(first(home_zone) == 'N', 2,
+											  ifelse(first(home_zone) == 'O', 3, NA)))
+			  ),
+			by = .(game_id, face_index) ]
+			df_fo <- df_fo[ mask==TRUE, .(game_id, event_index, home_zonestart) ]
+			# identical( df_fo$home_zonestart, face_index$home_zonestart )
+			# . we get identical cols if we do period < 5 below but the above is actually correct: in playoffs, we want all overtime periods, even the 5th and beyond obviously
+			# df_fo$mask = df_fo$event_type %in% c(st.corsi_events, 'faceoff') & df_fo$period < 5
+
+			df <- left_join(df, df_fo, by = c('game_id', 'event_index'))
+
+			See how I currently have it in the function. I just create the new col and there is no need for a subsequent join.
+
 	fun.pbp_index() -- Python data version
 		I removed 'season' everywhere as game_id is already unique across seasons
 		I renamed home/away_goalie to home/away_on_goalie
@@ -314,6 +337,26 @@ xG_preparation.R
 		All of the above do not appear in xG_modelling.R -- so no impact there.
 
 		TODO: will have to do the same renames and deletion (i.e. of season) in fun.pbp_prep()
+
+		When "translating it" to data.table syntax, I initially thought I could do away with having to perform a join by filling some NA's instead using nafill() or unique():
+		  df[ ,
+			`:=`(
+			  # shift_ID     = nafill( shift_ID,     type = 'locf' ),
+			  # shift_length = nafill( shift_length, type = 'locf' )
+			  shift_ID     = unique( shift_ID ),
+			  shift_length = unique( shift_length )
+			  ),
+			by = .(game_id, period,
+				   home_on_1, home_on_2, home_on_3, home_on_4, home_on_5, home_on_6,
+				   away_on_1, away_on_2, away_on_3, away_on_4, away_on_5, away_on_6,
+				   home_on_goalie, away_on_goalie, face_index, shift_index, pen_index
+				   )
+			]
+
+		nafill() was not so bad but looks like I would have had to call it a second time with type= 'nocf' to have all rows replaced.
+
+		The simplest thing is quite likely to be that left_join() at the end to propagate the data from the shift_ID and shift_length columns, so that's what I did.
+
 
 	fun.pbp_full_add()
 		This function calls other functions; in addition to pbp_expand() and pbp_index(), it calls pbp_prep() and model_prep() that we haven't described yet.
@@ -374,23 +417,44 @@ xG_preparation.R
 				#                            ifelse( dt$is_home==TRUE, dt$home_score - dt$away_score, dt$away_score - dt$home_score),
 				#                            NA )
 
-		Lag function:
-			. the lag() function used is dplyr's. The plan is in the long-run is to stop using dplyr for these function -- unless I really need to.
-			. I think the stat package has a lag method as well, could we use that one instead?
-				?stats::lag
-				?dplyr::lag
-				TODO: specify that stats:: name space and see if we get the same results
+		data.table's shift() instead of dplyr's lag function:
+			?shift
 
-	Columns not returned:
-		game_date -- pretty sure we don't need it
-		event_description -- pretty sure we don't need it
-		pbp_distance -- pretty sure we don't need it
-		game_score_state -- what would be the difference with score_state? look into it
+			There is a lag() function in stats but it seems to be specific to time-series objects and apparently is not well suited for by operations.
 
-    Used the Python data names for columns:
-		details.shootingPlayerId instead of event_player_1
-		home_on_goalie instead of home_goalie
-		away_on_goalie instead of away_goalie
+			data.table has a shift() function.
+
+			Before changing lag() to shift() in fun.pbp_prep(), I created *_alt columns and checked them against the ones created with lag()
+
+			browser()
+			dt[ mask==TRUE,
+				`:=`(
+				seconds_since_last_alt  = game_seconds - shift(game_seconds),
+				event_type_last_alt     = shift(event_type),
+				event_team_last_alt     = shift(event_team),
+				event_strength_last_alt = shift(game_strength_state),
+				coords_x_last_alt       = shift(coords_x),
+				coords_y_last_alt       = shift(coords_y)
+				),
+				by = .(game_id, period) ]
+
+			identical( dt$seconds_since_last, dt$seconds_since_last_alt )
+			identical( dt$event_type_last, dt$event_type_last_alt )
+			identical( dt$event_team_last, dt$event_team_last_alt )
+			identical( dt$event_strength_last, dt$event_strength_last_alt )
+			identical( dt$coords_x_last, dt$coords_x_last_alt )
+			identical( dt$coords_y_last, dt$coords_y_last_alt )
+
+		Columns not returned:
+			game_date -- pretty sure we don't need it
+			event_description -- pretty sure we don't need it
+			pbp_distance -- pretty sure we don't need it
+			game_score_state -- what would be the difference with score_state? look into it
+
+		Used the Python data names for columns:
+			details.shootingPlayerId instead of event_player_1
+			home_on_goalie instead of home_goalie
+			away_on_goalie instead of away_goalie
 
 
 R scraped data
