@@ -618,12 +618,12 @@ fun.pbp_prep <- function(dt, prep_type) {
   # Tag events related to a penalty shot
   dt$is_pen_shot <- grepl( '*-on-breakaway', dt$details.descKey, )
   dt[ ,  is_pen_shot := any(is_pen_shot), by = .(game_id, game_seconds) ]
-  dt[  dt$event_type=='faceoff' & dt$is_pen_shot==TRUE, 'is_pen_shot' ] <- FALSE
+  dt[  event_type=='faceoff' & is_pen_shot==TRUE, 'is_pen_shot' ] <- FALSE
 
   dt$mask <- dt$event_type %in% c('faceoff', 'goal', 'blocked-shot', 'shot-on-goal', 'missed-shot', 'hit', 'takeaway', 'giveaway') &
              ! ( dt$is_shoot_out | dt$is_pen_shot | is.na(dt$coords_x) | is.na(dt$coords_y) )
 
-  dt[ dt$mask==TRUE,
+  dt[ mask==TRUE,
       `:=`(
         seconds_since_last  = game_seconds - shift(game_seconds),
         event_type_last     = shift(event_type),
@@ -637,13 +637,13 @@ fun.pbp_prep <- function(dt, prep_type) {
   if(prep_type == 'EV') {
     dt$mask2 <- dt$mask==TRUE & dt$event_type %in% st.fenwick_events & dt$game_strength_state %in% st.even_strength
 
-    dt[ dt$mask2==TRUE,
+    dt[ mask2==TRUE,
         `:=`(
           same_team_last = 1 * (event_team == event_team_last),
           distance_from_last = sqrt((coords_x - coords_x_last)^2 + (coords_y - coords_y_last)^2)
           ) ]
 
-    dt[ dt$mask2==TRUE,
+    dt[ mask2==TRUE,
         .( game_id, event_index, season, period, game_seconds,
            game_strength_state, score_state, is_home,
            details.shootingPlayerId, home_on_goalie, away_on_goalie,
@@ -892,56 +892,64 @@ fun.model_prep <- function(data, prep_type) {
   if(prep_type == 'EV') {
 
     # Create EV dummy variables, returns a matrix.
-    model_prep <- data %>%
-      mutate(is_goal = 1 * (event_type == 'goal'),
 
-             state_5v5 = 1 * (game_strength_state == '5v5'),
-             state_4v4 = 1 * (game_strength_state == '4v4'),
-             state_3v3 = 1 * (game_strength_state == '3v3'),
+    dt <- as.data.table( data )
+    dt[ ,
+        `:=`(
+          is_goal   = 1 * (event_type == 'goal'),
 
-             score_down_4 = 1 * (score_state <= -4),
-             score_down_3 = 1 * (score_state == -3),
-             score_down_2 = 1 * (score_state == -2),
-             score_down_1 = 1 * (score_state == -1),
-             score_even   = 1 * (score_state ==  0),
-             score_up_1   = 1 * (score_state ==  1),
-             score_up_2   = 1 * (score_state ==  2),
-             score_up_3   = 1 * (score_state ==  3),
-             score_up_4   = 1 * (score_state >=  4),
+          state_5v5 = 1 * (game_strength_state == '5v5'),
+          state_4v4 = 1 * (game_strength_state == '4v4'),
+          state_3v3 = 1 * (game_strength_state == '3v3'),
 
-             wrist_shot =     1 * (event_detail == 'wrist'),
-             deflected_shot = 1 * (event_detail == 'deflected'),
-             tip_shot =       1 * (event_detail == 'tip-In'),
-             slap_shot =      1 * (event_detail == 'slap'),
-             backhand_shot =  1 * (event_detail == 'backhand'),
-             snap_shot =      1 * (event_detail == 'snap'),
-             wrap_shot =      1 * (event_detail == 'wrap-around'),
+          score_down_4 = 1 * (score_state <= -4),
+          score_down_3 = 1 * (score_state == -3),
+          score_down_2 = 1 * (score_state == -2),
+          score_down_1 = 1 * (score_state == -1),
+          score_even   = 1 * (score_state ==  0),
+          score_up_1   = 1 * (score_state ==  1),
+          score_up_2   = 1 * (score_state ==  2),
+          score_up_3   = 1 * (score_state ==  3),
+          score_up_4   = 1 * (score_state >=  4),
 
-             prior_shot_same =  1 * (event_type_last == 'shot-on-goal' & same_team_last == 1),
-             prior_miss_same =  1 * (event_type_last == 'missed-shot'  & same_team_last == 1),
-             prior_block_same = 1 * (event_type_last == 'blocked-shot' & same_team_last == 1),
-             prior_shot_opp =   1 * (event_type_last == 'shot-on-goal' & same_team_last == 0),
-             prior_miss_opp =   1 * (event_type_last == 'missed-shot'  & same_team_last == 0),
-             prior_block_opp =  1 * (event_type_last == 'blocked-shot' & same_team_last == 0),
+          wrist_shot     = 1 * (event_detail == 'wrist'),
+          deflected_shot = 1 * (event_detail == 'deflected'),
+          tip_shot       = 1 * (event_detail == 'tip-In'),
+          slap_shot      = 1 * (event_detail == 'slap'),
+          backhand_shot  = 1 * (event_detail == 'backhand'),
+          snap_shot      = 1 * (event_detail == 'snap'),
+          wrap_shot      = 1 * (event_detail == 'wrap-around'),
 
-             prior_give_opp =  1 * (event_type_last == 'giveaway' & same_team_last == 0),
-             prior_give_same = 1 * (event_type_last == 'giveaway' & same_team_last == 1),
-             prior_take_opp =  1 * (event_type_last == 'takeaway' & same_team_last == 0),
-             prior_take_same = 1 * (event_type_last == 'takeaway' & same_team_last == 1),
-             prior_hit_opp =   1 * (event_type_last == 'hit' & same_team_last == 0),
-             prior_hit_same =  1 * (event_type_last == 'hit' & same_team_last == 1),
-             prior_face =      1 * (event_type_last == 'faceoff')
-             ) %>%
-      select(is_goal,
-             shot_distance, shot_angle, is_home,
-             state_5v5:state_3v3,
-             score_down_4:score_up_4,
-             game_seconds, period, coords_x, coords_y, coords_x_last, coords_y_last,
-             wrist_shot:wrap_shot, distance_from_last, seconds_since_last,
-             prior_shot_same:prior_face
-             ) %>%
-      data.matrix()
+          prior_shot_same  = 1 * (event_type_last == 'shot-on-goal' & same_team_last == 1),
+          prior_miss_same  = 1 * (event_type_last == 'missed-shot'  & same_team_last == 1),
+          prior_block_same = 1 * (event_type_last == 'blocked-shot' & same_team_last == 1),
+          prior_shot_opp   = 1 * (event_type_last == 'shot-on-goal' & same_team_last == 0),
+          prior_miss_opp   = 1 * (event_type_last == 'missed-shot'  & same_team_last == 0),
+          prior_block_opp  = 1 * (event_type_last == 'blocked-shot' & same_team_last == 0),
 
+          prior_give_opp  = 1 * (event_type_last == 'giveaway' & same_team_last == 0),
+          prior_give_same = 1 * (event_type_last == 'giveaway' & same_team_last == 1),
+          prior_take_opp  = 1 * (event_type_last == 'takeaway' & same_team_last == 0),
+          prior_take_same = 1 * (event_type_last == 'takeaway' & same_team_last == 1),
+          prior_hit_opp   = 1 * (event_type_last == 'hit' & same_team_last == 0),
+          prior_hit_same  = 1 * (event_type_last == 'hit' & same_team_last == 1),
+          prior_face      = 1 * (event_type_last == 'faceoff')
+          ) ]
+
+    data.matrix(
+      dt[ ,
+          .(
+            is_goal, shot_distance, shot_angle, is_home,
+            state_5v5, state_4v4, state_3v3,
+            score_down_4, score_down_3, score_down_2, score_down_1, score_even, score_up_1, score_up_2, score_up_3, score_up_4,
+            game_seconds, period, coords_x, coords_y, coords_x_last, coords_y_last,
+            wrist_shot, deflected_shot, tip_shot, slap_shot, backhand_shot, snap_shot, wrap_shot,
+            distance_from_last, seconds_since_last,
+            prior_shot_same, prior_miss_same, prior_block_same, prior_shot_opp, prior_miss_opp, prior_block_opp,
+            prior_give_opp, prior_give_same, prior_take_opp, prior_take_same, prior_hit_opp, prior_hit_same, prior_face
+            )
+          ]
+      )
   }
   else if(prep_type == 'UE') {
 
